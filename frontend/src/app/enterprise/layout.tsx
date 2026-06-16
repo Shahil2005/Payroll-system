@@ -4,13 +4,13 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { useAuth } from "@/components/AuthProvider";
-import type { Permission } from "@/utils/auth";
+import { permissionForRoute } from "@/utils/auth";
 
-const NAV: { label: string; icon: string; path: string; perm: Permission }[] = [
-  { label: "Dashboard", icon: "dashboard", path: "/enterprise/dashboard", perm: "payroll:read" },
-  { label: "Payroll", icon: "payments", path: "/enterprise/payroll", perm: "payroll:read" },
-  { label: "Salary Structures", icon: "tune", path: "/enterprise/payroll/structures", perm: "payroll:read" },
-  { label: "Employees", icon: "groups", path: "/enterprise/employees", perm: "payroll:read" },
+const NAV: { label: string; icon: string; path: string }[] = [
+  { label: "Dashboard", icon: "dashboard", path: "/enterprise/dashboard" },
+  { label: "Payroll", icon: "payments", path: "/enterprise/payroll" },
+  { label: "Salary Structures", icon: "tune", path: "/enterprise/payroll/structures" },
+  { label: "Employees", icon: "groups", path: "/enterprise/employees" },
 ];
 
 export default function EnterpriseLayout({
@@ -34,6 +34,12 @@ export default function EnterpriseLayout({
       </div>
     );
   }
+
+  // Route-level permission guard: a user may be authenticated yet lack the
+  // permission for this specific page (e.g. reached by typing the URL). The
+  // sidebar already hides such links; this blocks direct navigation too.
+  const requiredPerm = permissionForRoute(pathname);
+  const routeAllowed = !requiredPerm || can(requiredPerm);
 
   const isActive = (path: string) =>
     path === "/enterprise/payroll"
@@ -61,7 +67,10 @@ export default function EnterpriseLayout({
         </div>
 
         <nav className="flex flex-col gap-1">
-          {NAV.filter((item) => can(item.perm)).map((item) => {
+          {NAV.filter((item) => {
+            const perm = permissionForRoute(item.path);
+            return !perm || can(perm);
+          }).map((item) => {
             const active = isActive(item.path);
             return (
               <Link
@@ -101,7 +110,24 @@ export default function EnterpriseLayout({
       </aside>
 
       <main className="ml-64 flex-1 bg-[var(--color-bg)] p-8 print:ml-0 print:p-0">
-        {children}
+        {routeAllowed ? (
+          children
+        ) : (
+          <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3 text-center">
+            <span className="material-symbols-outlined text-5xl text-[var(--color-dim)]">lock</span>
+            <h2 className="text-xl font-bold">Access denied</h2>
+            <p className="max-w-sm text-sm text-[var(--color-muted)]">
+              You don&apos;t have permission to view this page. Contact an administrator if you
+              believe this is a mistake.
+            </p>
+            <Link
+              href="/enterprise/dashboard"
+              className="mt-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]"
+            >
+              Back to Dashboard
+            </Link>
+          </div>
+        )}
       </main>
     </div>
   );

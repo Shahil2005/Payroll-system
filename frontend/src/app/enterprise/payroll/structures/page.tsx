@@ -11,6 +11,7 @@ import {
 } from "@/utils/api";
 import { Banner, Modal } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
+import { useDialog } from "@/components/DialogProvider";
 
 interface LineDraft {
   code: string;
@@ -59,6 +60,7 @@ function fromMoneyLines(lines: MoneyLine[]): LineDraft[] {
 
 export default function StructuresPage() {
   const { can } = useAuth();
+  const { confirm, alert } = useDialog();
   const canEdit = can("payroll:configure");
   const [structures, setStructures] = useState<SalaryStructure[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -77,6 +79,7 @@ export default function StructuresPage() {
   const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
   const [earnings, setEarnings] = useState<LineDraft[]>([]);
   const [deductions, setDeductions] = useState<LineDraft[]>([]);
+  const [lopDays, setLopDays] = useState("0");
 
   async function load() {
     setLoading(true);
@@ -119,6 +122,7 @@ export default function StructuresPage() {
       { ...emptyLine(), code: "HRA", label: "HRA", type: "percent", percent: "40", percent_of: "BASIC" },
     ]);
     setDeductions([{ ...emptyLine(), code: "PF", label: "Provident Fund", type: "fixed", amount: "1800" }]);
+    setLopDays("0");
     setFormErr(null);
     setOpen(true);
   }
@@ -132,6 +136,7 @@ export default function StructuresPage() {
     setEffectiveFrom(s.effective_from);
     setEarnings(fromMoneyLines(s.components));
     setDeductions(fromMoneyLines(s.default_deductions));
+    setLopDays(String(s.lop_days ?? 0));
     setFormErr(null);
     setOpen(true);
   }
@@ -150,6 +155,7 @@ export default function StructuresPage() {
       effective_from: effectiveFrom,
       components: toMoneyLines(earnings),
       default_deductions: toMoneyLines(deductions),
+      lop_days: Number(lopDays) || 0,
       is_active: true,
     };
     setSaving(true);
@@ -169,12 +175,18 @@ export default function StructuresPage() {
   }
 
   async function remove(id: string) {
-    if (!confirm("Delete this salary structure?")) return;
+    const ok = await confirm({
+      title: "Delete salary structure",
+      message: "Delete this salary structure? This cannot be undone.",
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await payrollApi.deleteStructure(id);
       await load();
     } catch (err) {
-      alert((err as Error).message);
+      await alert({ message: (err as Error).message, tone: "danger" });
     }
   }
 
@@ -298,6 +310,23 @@ export default function StructuresPage() {
               rows={deductions}
               setRows={setDeductions}
               earningCodes={earningCodes}
+              footer={
+                <label className="flex flex-col gap-1.5 border-t border-[var(--color-border)] pt-3">
+                  <span className="lbl">Loss of Pay (LOP days)</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    className="input w-40"
+                    value={lopDays}
+                    onChange={(e) => setLopDays(e.target.value)}
+                  />
+                  <span className="text-xs text-[var(--color-muted)]">
+                    Unpaid days for this employee. Earnings are pro-rated over {/* working-days basis */}
+                    30 days when payroll runs.
+                  </span>
+                </label>
+              }
             />
 
             {/* Live estimate */}
@@ -342,11 +371,13 @@ function LineSection({
   rows,
   setRows,
   earningCodes,
+  footer,
 }: {
   title: string;
   rows: LineDraft[];
   setRows: (r: LineDraft[]) => void;
   earningCodes: string[];
+  footer?: React.ReactNode;
 }) {
   const update = (i: number, patch: Partial<LineDraft>) =>
     setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
@@ -429,6 +460,7 @@ function LineSection({
           </div>
         ))}
       </div>
+      {footer && <div className="mt-3">{footer}</div>}
     </div>
   );
 }

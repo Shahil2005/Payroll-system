@@ -78,6 +78,7 @@ async def create_salary_structure(
         effective_from=payload.effective_from,
         components=[c.model_dump(mode="json") for c in payload.components],
         default_deductions=[d.model_dump(mode="json") for d in payload.default_deductions],
+        lop_days=payload.lop_days,
         is_active=payload.is_active,
     )
     db.add(struct)
@@ -349,7 +350,10 @@ async def list_cycle_payslips(
     company_id: uuid.UUID = Depends(get_current_company_id),
     _: object = Depends(require_permission(Permission.PAYROLL_READ)),
 ) -> list[Payslip]:
-    await payroll_service._load_cycle(db, id, company_id)
+    cycle = await payroll_service._load_cycle(db, id, company_id)
+    # Payslips are only released once the cycle has been disbursed (marked PAID).
+    if cycle.status != PayrollCycleStatus.PAID:
+        return []
     rows = (
         await db.execute(
             select(Payslip).where(
@@ -374,4 +378,11 @@ async def get_payslip(
     ).scalar_one_or_none()
     if not payslip:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payslip not found")
+    # Payslips are only released once the cycle has been disbursed (marked PAID).
+    cycle = await payroll_service._load_cycle(db, payslip.cycle_id, company_id)
+    if cycle.status != PayrollCycleStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This payslip is not available until the payroll cycle is marked as paid.",
+        )
     return payslip

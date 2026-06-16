@@ -11,6 +11,7 @@ import {
 } from "@/utils/api";
 import { Banner, Modal, StatusBadge } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
+import { useDialog } from "@/components/DialogProvider";
 
 function Metric({
   icon,
@@ -37,6 +38,7 @@ function Metric({
 
 export default function PayrollHome() {
   const { can } = useAuth();
+  const { confirm, alert } = useDialog();
   const [cycles, setCycles] = useState<PayrollCycle[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [structures, setStructures] = useState<SalaryStructure[]>([]);
@@ -109,19 +111,25 @@ export default function PayrollHome() {
       setShowModal(false);
       await load();
     } catch (err) {
-      alert((err as Error).message);
+      await alert({ message: (err as Error).message, tone: "danger" });
     } finally {
       setSaving(false);
     }
   }
 
   async function remove(id: string) {
-    if (!confirm("Delete this draft cycle?")) return;
+    const ok = await confirm({
+      title: "Delete draft cycle",
+      message: "Delete this draft cycle? This cannot be undone.",
+      confirmLabel: "Delete",
+      tone: "danger",
+    });
+    if (!ok) return;
     try {
       await payrollApi.deleteCycle(id);
       await load();
     } catch (err) {
-      alert((err as Error).message);
+      await alert({ message: (err as Error).message, tone: "danger" });
     }
   }
 

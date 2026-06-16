@@ -297,7 +297,8 @@ async def run_payroll(
             )
         ).scalar_one_or_none()
 
-        lop_days = existing.lop_days if existing else Decimal("0.0")
+        # LOP is configured on the salary structure by HR; it drives proration.
+        lop_days = Decimal(str(struct.lop_days or "0"))
 
         try:
             computed = compute_payslip(struct, lop_days, working_days)
@@ -309,6 +310,7 @@ async def run_payroll(
             existing.gross_earnings = computed["gross_earnings"]
             existing.total_deductions = computed["total_deductions"]
             existing.net_pay = computed["net_pay"]
+            existing.lop_days = lop_days
             existing.paid_days = computed["paid_days"]
             existing.earnings = computed["earnings"]
             existing.deductions = computed["deductions"]

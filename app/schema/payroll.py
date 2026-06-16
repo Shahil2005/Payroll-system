@@ -50,6 +50,9 @@ class SalaryStructureBase(BaseModel):
     effective_from: date
     components: list[MoneyLine]
     default_deductions: list[MoneyLine] = Field(default_factory=list)
+    lop_days: Decimal = Field(
+        default=Decimal("0"), ge=0, description="Loss-of-pay days (pro-rates earnings each run)"
+    )
     is_active: bool = Field(default=True)
 
 
@@ -64,6 +67,7 @@ class SalaryStructureUpdate(BaseModel):
     effective_from: date | None = None
     components: list[MoneyLine] | None = None
     default_deductions: list[MoneyLine] | None = None
+    lop_days: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
 
 

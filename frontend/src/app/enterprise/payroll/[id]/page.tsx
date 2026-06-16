@@ -12,10 +12,12 @@ import {
 } from "@/utils/api";
 import { Banner, StatusBadge } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
+import { useDialog } from "@/components/DialogProvider";
 
 export default function CycleDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { can } = useAuth();
+  const { confirm } = useDialog();
   const [cycle, setCycle] = useState<PayrollCycle | null>(null);
   const [payslips, setPayslips] = useState<Payslip[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -29,7 +31,7 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
     try {
       const c = await payrollApi.getCycle(id);
       setCycle(c);
-      if (c.status !== "DRAFT") setPayslips(await payrollApi.listCyclePayslips(id));
+      if (c.status === "PAID") setPayslips(await payrollApi.listCyclePayslips(id));
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -49,7 +51,7 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
   };
 
   async function act(fn: () => Promise<unknown>, confirmMsg?: string) {
-    if (confirmMsg && !confirm(confirmMsg)) return;
+    if (confirmMsg && !(await confirm(confirmMsg))) return;
     setBusy(true);
     setError(null);
     try {
@@ -191,10 +193,14 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
         {/* Right column: payslips */}
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-6 lg:col-span-2">
           <h3 className="mb-4 font-semibold">Employee Payslips</h3>
-          {cycle.status === "DRAFT" ? (
+          {cycle.status !== "PAID" ? (
             <div className="py-12 text-center text-[var(--color-muted)]">
               <span className="material-symbols-outlined mb-2 text-4xl text-[var(--color-dim)]">receipt_long</span>
-              <p>Run payroll to generate payslips.</p>
+              <p>
+                {cycle.status === "DRAFT"
+                  ? "Run payroll to generate payslips."
+                  : "Payslips become available once the cycle is marked as paid."}
+              </p>
             </div>
           ) : payslips.length === 0 ? (
             <p className="py-8 text-center text-[var(--color-muted)]">No payslips in this cycle.</p>

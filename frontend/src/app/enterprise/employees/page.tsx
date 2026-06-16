@@ -4,9 +4,11 @@ import { useEffect, useState } from "react";
 import { payrollApi, type Employee } from "@/utils/api";
 import { Banner, Modal } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
+import { useDialog } from "@/components/DialogProvider";
 
 export default function EmployeesPage() {
   const { can } = useAuth();
+  const { confirm } = useDialog();
   const canEdit = can("payroll:configure");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,7 +63,13 @@ export default function EmployeesPage() {
   }
 
   async function remove(emp: Employee) {
-    if (!confirm(`Remove ${emp.first_name} ${emp.last_name}? Their salary structure is removed too.`)) return;
+    const ok = await confirm({
+      title: "Remove employee",
+      message: `Remove ${emp.first_name} ${emp.last_name}? Their salary structure is removed too.`,
+      confirmLabel: "Remove",
+      tone: "danger",
+    });
+    if (!ok) return;
     setError(null);
     setDeletingId(emp.id);
     try {

@@ -245,6 +245,9 @@ def test_payroll_lifecycle() -> None:
         assert got["totals"]["deductions"] == 1800.0
         assert got["totals"]["net"] == 54200.0
 
+        # Payslips stay hidden until the cycle is PAID (PROCESSING -> empty list)
+        assert c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json() == []
+
         # Re-run on PROCESSING is allowed (idempotent refresh)
         rerun = c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
         assert rerun.status_code == status.HTTP_200_OK
@@ -253,6 +256,20 @@ def test_payroll_lifecycle() -> None:
         approve = c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
         assert approve.status_code == status.HTTP_200_OK
         assert approve.json()["status"] == PayrollCycleStatus.APPROVED
+
+        # Still hidden while APPROVED; direct payslip fetch is forbidden pre-PAID
+        assert c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json() == []
+        conn = psycopg2.connect(_DSN)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM payslips WHERE cycle_id = %s;", (cid,))
+        hidden_slip_id = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        assert (
+            c.get(f"/api/v1/enterprise/payroll/payslips/{hidden_slip_id}").status_code
+            == status.HTTP_403_FORBIDDEN
+        )
 
         # Run after approve -> 409 (locked)
         assert c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run").status_code == status.HTTP_409_CONFLICT
@@ -269,6 +286,26 @@ def test_payroll_lifecycle() -> None:
         detail = c.get(f"/api/v1/enterprise/payroll/payslips/{slips[0]['id']}").json()
         codes = {line["code"] for line in detail["earnings"]}
         assert codes == {"BASIC", "HRA"}
+
+
+def test_run_uses_structure_lop_days() -> None:
+    """HR sets lop_days on the salary structure; run pro-rates earnings by it."""
+    with authed_client() as c:
+        # BASIC 40000 + HRA 40% = 56000 gross; 3 LOP days over 30 -> x0.9
+        _create_structure(c, employee_id=EMP1, lop_days=3)
+        cid = _create_cycle(c, name="LOP cycle")["id"]
+        assert c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run").status_code == status.HTTP_200_OK
+
+        got = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}").json()
+        # 36000 + 14400 = 50400 gross; PF 1800 fixed -> 48600 net
+        assert got["totals"]["gross"] == 50400.0
+        assert got["totals"]["net"] == 48600.0
+
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+        slip = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()[0]
+        assert Decimal(str(slip["lop_days"])) == Decimal("3")
+        assert Decimal(str(slip["paid_days"])) == Decimal("27")
 
 
 def test_run_idempotent_on_draft() -> None:

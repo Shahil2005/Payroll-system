@@ -54,3 +54,23 @@ export function clearSession(): void {
 export function userCan(user: AuthUser | null, permission: Permission): boolean {
   return !!user && user.permissions.includes(permission);
 }
+
+// Single source of truth for which permission an enterprise route requires.
+// Checked in the enterprise layout so direct-URL navigation is gated, not just
+// the sidebar links (defense in depth — the API also returns 403). List the
+// most specific prefixes first; the first matching prefix wins.
+export const routePermissions: ReadonlyArray<{
+  prefix: string;
+  permission: Permission;
+}> = [
+  { prefix: "/enterprise/dashboard", permission: "payroll:read" },
+  { prefix: "/enterprise/payroll/structures", permission: "payroll:read" },
+  { prefix: "/enterprise/payroll", permission: "payroll:read" },
+  { prefix: "/enterprise/employees", permission: "payroll:read" },
+];
+
+/** Permission required to view `pathname`, or null when the route is ungated. */
+export function permissionForRoute(pathname: string): Permission | null {
+  const match = routePermissions.find((r) => pathname.startsWith(r.prefix));
+  return match ? match.permission : null;
+}

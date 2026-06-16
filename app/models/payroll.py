@@ -48,6 +48,10 @@ class SalaryStructure(Base, TimestampMixin):
     components: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     # Recurring deduction lines applied each run (same union as components)
     default_deductions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    # Loss-of-pay days HR enters per employee; pro-rates earnings each run.
+    lop_days: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), default=Decimal("0"), server_default=text("0")
+    )
     is_active: Mapped[bool] = mapped_column(default=True)
 
     employee: Mapped["Employee"] = relationship(back_populates="salary_structures")

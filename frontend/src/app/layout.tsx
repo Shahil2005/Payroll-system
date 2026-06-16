@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AuthProvider } from "@/components/AuthProvider";
+import { DialogProvider } from "@/components/DialogProvider";
 
 export const metadata: Metadata = {
   title: "Croar Payroll",
@@ -20,7 +21,9 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <DialogProvider>{children}</DialogProvider>
+        </AuthProvider>
       </body>
     </html>
   );

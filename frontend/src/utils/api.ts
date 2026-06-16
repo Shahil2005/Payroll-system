@@ -35,6 +35,7 @@ export interface SalaryStructure {
   effective_from: string;
   components: MoneyLine[];
   default_deductions: MoneyLine[];
+  lop_days: number | string;
   is_active: boolean;
   created_at: string;
   updated_at: string;
