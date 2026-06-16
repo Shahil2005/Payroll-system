@@ -130,6 +130,115 @@ async def _load_cycle(
     return cycle
 
 
+def _cycle_brief(cycle: PayrollCycle) -> dict[str, Any]:
+    totals = cycle.totals or {}
+    return {
+        "id": cycle.id,
+        "name": cycle.name,
+        "status": cycle.status,
+        "period_start": cycle.period_start,
+        "period_end": cycle.period_end,
+        "pay_date": cycle.pay_date,
+        "net": Decimal(str(totals.get("net", 0))),
+        "headcount": int(totals.get("headcount", 0) or 0),
+    }
+
+
+async def dashboard_summary(
+    db: AsyncSession, company_id: uuid.UUID
+) -> dict[str, Any]:
+    """Application-wide overview for the dashboard (all server-side, one call).
+
+    Aggregates employees, salary configuration coverage, payroll-cycle status
+    counts, money disbursed/pending, and the most recent cycles. Everything is
+    scoped to the caller's company.
+    """
+    # --- Employees (active) ---
+    employees = (
+        await db.execute(
+            select(Employee.id).where(
+                Employee.company_id == company_id,
+                Employee.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    employee_ids = set(employees)
+
+    # --- Active salary structures + which employees are configured ---
+    structure_emp_ids = (
+        await db.execute(
+            select(SalaryStructure.employee_id).where(
+                SalaryStructure.company_id == company_id,
+                SalaryStructure.is_active.is_(True),
+                SalaryStructure.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    configured_ids = set(structure_emp_ids) & employee_ids
+    active_structures = len(structure_emp_ids)
+
+    # --- Cycles (non-deleted) ---
+    cycles = (
+        await db.execute(
+            select(PayrollCycle)
+            .where(
+                PayrollCycle.company_id == company_id,
+                PayrollCycle.deleted_at.is_(None),
+            )
+            .order_by(PayrollCycle.created_at.desc())
+        )
+    ).scalars().all()
+
+    by_status: dict[str, int] = {s.value: 0 for s in PayrollCycleStatus}
+    gross_paid = net_paid = pending_net = Decimal("0.00")
+    payslips_paid = 0
+    for cycle in cycles:
+        by_status[cycle.status] = by_status.get(cycle.status, 0) + 1
+        totals = cycle.totals or {}
+        net = Decimal(str(totals.get("net", 0)))
+        gross = Decimal(str(totals.get("gross", 0)))
+        headcount = int(totals.get("headcount", 0) or 0)
+        if cycle.status == PayrollCycleStatus.PAID.value:
+            net_paid += net
+            gross_paid += gross
+            payslips_paid += headcount
+        elif cycle.status in (
+            PayrollCycleStatus.PROCESSING.value,
+            PayrollCycleStatus.APPROVED.value,
+        ):
+            pending_net += net
+
+    # Current = most recent cycle still in flight; else most recent overall.
+    current = next(
+        (
+            c
+            for c in cycles
+            if c.status
+            not in (PayrollCycleStatus.PAID.value, PayrollCycleStatus.CANCELLED.value)
+        ),
+        cycles[0] if cycles else None,
+    )
+
+    return {
+        "employees": {
+            "total": len(employee_ids),
+            "configured": len(configured_ids),
+            "missing": len(employee_ids - configured_ids),
+        },
+        "active_structures": active_structures,
+        "cycles": {"total": len(cycles), "by_status": by_status},
+        "payroll": {
+            "gross_paid": gross_paid,
+            "net_paid": net_paid,
+            "payslips_paid": payslips_paid,
+            "pending_net": pending_net,
+        },
+        "current_cycle": _cycle_brief(current) if current else None,
+        "recent_cycles": [_cycle_brief(c) for c in cycles[:5]],
+        "currency": "INR",
+    }
+
+
 async def run_payroll(
     db: AsyncSession, cycle_id: uuid.UUID, company_id: uuid.UUID
 ) -> dict[str, Any]:

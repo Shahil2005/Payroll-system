@@ -107,6 +107,32 @@ export interface SkippedEmployee {
   reason: string;
 }
 
+export interface DashboardCycle {
+  id: string;
+  name: string;
+  status: CycleStatus;
+  period_start: string;
+  period_end: string;
+  pay_date: string;
+  net: number | string;
+  headcount: number;
+}
+
+export interface DashboardSummary {
+  employees: { total: number; configured: number; missing: number };
+  active_structures: number;
+  cycles: { total: number; by_status: Record<string, number> };
+  payroll: {
+    gross_paid: number | string;
+    net_paid: number | string;
+    payslips_paid: number;
+    pending_net: number | string;
+  };
+  current_cycle: DashboardCycle | null;
+  recent_cycles: DashboardCycle[];
+  currency: string;
+}
+
 export interface RunResult {
   created: number;
   updated: number;
@@ -166,6 +192,9 @@ const P = "/api/v1/enterprise/payroll";
 const E = "/api/v1/enterprise/employees";
 
 export const payrollApi = {
+  // Dashboard
+  getDashboard: () => apiClient.get<DashboardSummary>(`${P}/dashboard`),
+
   // Salary structures
   listStructures: (employeeId?: string) =>
     apiClient.get<SalaryStructure[]>(

@@ -426,3 +426,34 @@ def test_users_admin_only() -> None:
         assert c.get("/api/v1/auth/users").status_code == status.HTTP_200_OK
     with authed_client(VIEWER) as c:
         assert c.get("/api/v1/auth/users").status_code == status.HTTP_403_FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+def test_dashboard_summary() -> None:
+    with authed_client() as c:
+        # Configure EMP1 and run+approve+pay a cycle so paid totals populate.
+        _create_structure(c, employee_id=EMP1)
+        cid = _create_cycle(c)["id"]
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+
+        d = c.get("/api/v1/enterprise/payroll/dashboard")
+        assert d.status_code == status.HTTP_200_OK, d.text
+        body = d.json()
+        assert body["employees"]["total"] == 2
+        assert body["employees"]["configured"] == 1
+        assert body["employees"]["missing"] == 1
+        assert body["active_structures"] == 1
+        assert body["cycles"]["total"] == 1
+        assert body["cycles"]["by_status"]["PAID"] == 1
+        assert float(body["payroll"]["net_paid"]) == 54200.0
+        assert body["payroll"]["payslips_paid"] == 1
+        assert len(body["recent_cycles"]) == 1
+
+
+def test_dashboard_requires_auth() -> None:
+    with TestClient(app) as c:
+        assert c.get("/api/v1/enterprise/payroll/dashboard").status_code == status.HTTP_401_UNAUTHORIZED

@@ -12,6 +12,7 @@ from app.core.dependencies import (
 )
 from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
 from app.schema.payroll import (
+    DashboardSummary,
     PayrollCycleCreate,
     PayrollCycleOut,
     PayslipDetailOut,
@@ -24,6 +25,19 @@ from app.schema.payroll import (
 from app.services import payroll_service
 
 router = APIRouter(prefix="/api/v1/enterprise/payroll", tags=["payroll"])
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+@router.get("/dashboard", response_model=DashboardSummary)
+async def get_dashboard(
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> dict:
+    """Application-wide overview (employees, structures, cycles, money)."""
+    return await payroll_service.dashboard_summary(db, company_id)
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import { useAuth } from "@/components/AuthProvider";
 import type { Permission } from "@/utils/auth";
 
 const NAV: { label: string; icon: string; path: string; perm: Permission }[] = [
+  { label: "Dashboard", icon: "dashboard", path: "/enterprise/dashboard", perm: "payroll:read" },
   { label: "Payroll", icon: "payments", path: "/enterprise/payroll", perm: "payroll:read" },
   { label: "Salary Structures", icon: "tune", path: "/enterprise/payroll/structures", perm: "payroll:read" },
   { label: "Employees", icon: "groups", path: "/enterprise/employees", perm: "payroll:read" },

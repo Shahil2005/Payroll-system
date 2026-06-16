@@ -21,7 +21,7 @@ export default function LoginPage() {
 
   // Already signed in -> skip the login screen.
   useEffect(() => {
-    if (!loading && user) router.replace("/enterprise/payroll");
+    if (!loading && user) router.replace("/enterprise/dashboard");
   }, [loading, user, router]);
 
   async function submit(e: React.FormEvent) {
@@ -30,7 +30,7 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await login(email, password);
-      router.replace("/enterprise/payroll");
+      router.replace("/enterprise/dashboard");
     } catch (err) {
       setError((err as Error).message);
     } finally {

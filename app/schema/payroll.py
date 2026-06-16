@@ -157,3 +157,45 @@ class RunResult(BaseModel):
     created: int
     updated: int
     skipped: list[SkippedEmployee]
+
+
+# ---------------------------------------------------------------------------
+# Dashboard summary (application-wide overview)
+# ---------------------------------------------------------------------------
+class EmployeeStats(BaseModel):
+    total: int = 0
+    configured: int = 0  # have an active salary structure
+    missing: int = 0     # active employees without a structure
+
+
+class CycleStats(BaseModel):
+    total: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+
+
+class PayrollStats(BaseModel):
+    gross_paid: Decimal = Decimal("0.00")        # gross across PAID cycles
+    net_paid: Decimal = Decimal("0.00")          # net disbursed across PAID cycles
+    payslips_paid: int = 0                       # headcount across PAID cycles
+    pending_net: Decimal = Decimal("0.00")       # net in PROCESSING/APPROVED cycles
+
+
+class DashboardCycle(BaseModel):
+    id: uuid.UUID
+    name: str
+    status: PayrollCycleStatus
+    period_start: date
+    period_end: date
+    pay_date: date
+    net: Decimal = Decimal("0.00")
+    headcount: int = 0
+
+
+class DashboardSummary(BaseModel):
+    employees: EmployeeStats
+    active_structures: int = 0
+    cycles: CycleStats
+    payroll: PayrollStats
+    current_cycle: DashboardCycle | None = None
+    recent_cycles: list[DashboardCycle] = Field(default_factory=list)
+    currency: str = "INR"
