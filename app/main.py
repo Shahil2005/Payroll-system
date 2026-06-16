@@ -7,9 +7,10 @@ from app.core.config import setup_logger
 from app.core.manager import lifespan
 from app.core.redis import RedisHelper
 from app.core.settings import Settings
+from app.router.auth import router as auth_router
 from app.router.base import router as base_router
+from app.router.employee import router as employee_router
 from app.router.payroll import router as payroll_router
-from app.router.user import router as user_router
 
 _settings = Settings()
 
@@ -26,8 +27,9 @@ app.add_middleware(
 setup_logger(_settings.debug)
 
 app.include_router(base_router)
+app.include_router(auth_router)
 app.include_router(payroll_router)
-app.include_router(user_router)
+app.include_router(employee_router)
 
 
 client = TestClient(app)

@@ -7,6 +7,7 @@ class Base(DeclarativeBase):
 
 
 # Register the models for Migration
+from . import company  # noqa: E402, F401
 from . import user  # noqa: E402, F401
+from . import employee  # noqa: E402, F401
 from . import payroll  # noqa: E402, F401
-

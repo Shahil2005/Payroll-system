@@ -1,154 +1,72 @@
+import uuid
 from datetime import datetime
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 
-from app.constants import PayrollCycleStatus
-from app.core.dependencies import DBSessionDep, get_current_company_id
+from app.constants import PayrollCycleStatus, Permission
+from app.core.dependencies import (
+    DBSessionDep,
+    get_current_company_id,
+    require_permission,
+)
 from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
 from app.schema.payroll import (
     PayrollCycleCreate,
-    PayrollCycleResponse,
-    PayslipDetailResponse,
-    PayslipResponse,
+    PayrollCycleOut,
+    PayslipDetailOut,
+    PayslipOut,
+    RunResult,
     SalaryStructureCreate,
-    SalaryStructureResponse,
+    SalaryStructureOut,
     SalaryStructureUpdate,
 )
 from app.services import payroll_service
 
-router = APIRouter(prefix="/api/v1/payroll", tags=["payroll"])
+router = APIRouter(prefix="/api/v1/enterprise/payroll", tags=["payroll"])
 
 
-# --- Salary Structure Endpoints ---
+# ---------------------------------------------------------------------------
+# Salary structures
+# ---------------------------------------------------------------------------
 @router.post(
-    "/structures",
-    response_model=SalaryStructureResponse,
-    status_code=status.HTTP_201_CREATED,
+    "/structures", response_model=SalaryStructureOut, status_code=status.HTTP_201_CREATED
 )
 async def create_salary_structure(
     payload: SalaryStructureCreate,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
 ) -> SalaryStructure:
-    """Create a new salary structure.
-    
-    Validates that only one active structure exists per employee.
-    """
     if payload.is_active:
-        stmt = select(SalaryStructure).where(
-            SalaryStructure.employee_id == payload.employee_id,
-            SalaryStructure.company_id == company_id,
-            SalaryStructure.is_active == True,  # noqa: E712
-            SalaryStructure.deleted_at == None,  # noqa: E711
-        )
-        res = await db.execute(stmt)
-        existing = res.scalar_one_or_none()
+        existing = (
+            await db.execute(
+                select(SalaryStructure).where(
+                    SalaryStructure.employee_id == payload.employee_id,
+                    SalaryStructure.company_id == company_id,
+                    SalaryStructure.is_active.is_(True),
+                    SalaryStructure.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Employee already has an active salary structure in this company.",
+                detail="Employee already has an active salary structure.",
             )
 
-    new_struct = SalaryStructure(
+    struct = SalaryStructure(
         company_id=company_id,
         employee_id=payload.employee_id,
         ctc=payload.ctc,
         currency=payload.currency,
-        pay_frequency=payload.pay_frequency,
+        pay_frequency=payload.pay_frequency.value,
         effective_from=payload.effective_from,
-        components=payload.components,
-        default_deductions=payload.default_deductions,
+        components=[c.model_dump(mode="json") for c in payload.components],
+        default_deductions=[d.model_dump(mode="json") for d in payload.default_deductions],
         is_active=payload.is_active,
     )
-    db.add(new_struct)
-    try:
-        await db.commit()
-        await db.refresh(new_struct)
-    except Exception:
-        await db.rollback()
-        raise
-    return new_struct
-
-
-@router.get("/structures", response_model=list[SalaryStructureResponse])
-async def get_salary_structures(
-    db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> list[SalaryStructure]:
-    """Retrieve all non-deleted salary structures for the current company."""
-    stmt = select(SalaryStructure).where(
-        SalaryStructure.company_id == company_id,
-        SalaryStructure.deleted_at == None,  # noqa: E711
-    )
-    res = await db.execute(stmt)
-    return list(res.scalars().all())
-
-
-@router.get("/structures/{id}", response_model=SalaryStructureResponse)
-async def get_salary_structure(
-    id: int,
-    db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> SalaryStructure:
-    """Retrieve details of a specific non-deleted salary structure."""
-    stmt = select(SalaryStructure).where(
-        SalaryStructure.id == id,
-        SalaryStructure.company_id == company_id,
-        SalaryStructure.deleted_at == None,  # noqa: E711
-    )
-    res = await db.execute(stmt)
-    struct = res.scalar_one_or_none()
-    if not struct:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Salary structure not found or has been deleted",
-        )
-    return struct
-
-
-@router.put("/structures/{id}", response_model=SalaryStructureResponse)
-async def update_salary_structure(
-    id: int,
-    payload: SalaryStructureUpdate,
-    db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> SalaryStructure:
-    """Update field values of an existing salary structure."""
-    stmt = select(SalaryStructure).where(
-        SalaryStructure.id == id,
-        SalaryStructure.company_id == company_id,
-        SalaryStructure.deleted_at == None,  # noqa: E711
-    )
-    res = await db.execute(stmt)
-    struct = res.scalar_one_or_none()
-    if not struct:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Salary structure not found",
-        )
-
-    # Validate active constraint if is_active is toggled to True
-    if payload.is_active is True and struct.is_active is not True:
-        stmt_check = select(SalaryStructure).where(
-            SalaryStructure.employee_id == struct.employee_id,
-            SalaryStructure.company_id == company_id,
-            SalaryStructure.is_active == True,  # noqa: E712
-            SalaryStructure.deleted_at == None,  # noqa: E711
-            SalaryStructure.id != id,
-        )
-        res_check = await db.execute(stmt_check)
-        existing = res_check.scalar_one_or_none()
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Employee already has an active salary structure in this company.",
-            )
-
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(struct, field, value)
-
+    db.add(struct)
     try:
         await db.commit()
         await db.refresh(struct)
@@ -158,26 +76,121 @@ async def update_salary_structure(
     return struct
 
 
-@router.delete("/structures/{id}", response_model=SalaryStructureResponse)
-async def delete_salary_structure(
-    id: int,
+@router.get("/structures", response_model=list[SalaryStructureOut])
+async def list_salary_structures(
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> SalaryStructure:
-    """Perform soft-deletion of a salary structure by setting deleted_at and deactivating."""
+    employee_id: uuid.UUID | None = None,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> list[SalaryStructure]:
     stmt = select(SalaryStructure).where(
-        SalaryStructure.id == id,
         SalaryStructure.company_id == company_id,
-        SalaryStructure.deleted_at == None,  # noqa: E711
+        SalaryStructure.deleted_at.is_(None),
     )
-    res = await db.execute(stmt)
-    struct = res.scalar_one_or_none()
-    if not struct:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Salary structure not found",
-        )
+    if employee_id is not None:
+        stmt = stmt.where(SalaryStructure.employee_id == employee_id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return list(rows)
 
+
+@router.get("/structures/{id}", response_model=SalaryStructureOut)
+async def get_salary_structure(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> SalaryStructure:
+    struct = (
+        await db.execute(
+            select(SalaryStructure).where(
+                SalaryStructure.id == id,
+                SalaryStructure.company_id == company_id,
+                SalaryStructure.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not struct:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Salary structure not found")
+    return struct
+
+
+@router.put("/structures/{id}", response_model=SalaryStructureOut)
+async def update_salary_structure(
+    id: uuid.UUID,
+    payload: SalaryStructureUpdate,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> SalaryStructure:
+    struct = (
+        await db.execute(
+            select(SalaryStructure).where(
+                SalaryStructure.id == id,
+                SalaryStructure.company_id == company_id,
+                SalaryStructure.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not struct:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Salary structure not found")
+
+    if payload.is_active is True and struct.is_active is not True:
+        clash = (
+            await db.execute(
+                select(SalaryStructure).where(
+                    SalaryStructure.employee_id == struct.employee_id,
+                    SalaryStructure.company_id == company_id,
+                    SalaryStructure.is_active.is_(True),
+                    SalaryStructure.deleted_at.is_(None),
+                    SalaryStructure.id != id,
+                )
+            )
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Employee already has an active salary structure.",
+            )
+
+    update_fields = payload.model_dump(exclude_unset=True)
+    if payload.components is not None:
+        update_fields["components"] = [c.model_dump(mode="json") for c in payload.components]
+    if payload.default_deductions is not None:
+        update_fields["default_deductions"] = [
+            d.model_dump(mode="json") for d in payload.default_deductions
+        ]
+    if payload.pay_frequency is not None:
+        update_fields["pay_frequency"] = payload.pay_frequency.value
+
+    for field, value in update_fields.items():
+        setattr(struct, field, value)
+    try:
+        await db.commit()
+        await db.refresh(struct)
+    except Exception:
+        await db.rollback()
+        raise
+    return struct
+
+
+@router.delete("/structures/{id}", response_model=SalaryStructureOut)
+async def delete_salary_structure(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> SalaryStructure:
+    struct = (
+        await db.execute(
+            select(SalaryStructure).where(
+                SalaryStructure.id == id,
+                SalaryStructure.company_id == company_id,
+                SalaryStructure.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not struct:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Salary structure not found")
     struct.deleted_at = datetime.utcnow()
     struct.is_active = False
     try:
@@ -189,207 +202,162 @@ async def delete_salary_structure(
     return struct
 
 
-# --- Payroll Cycle Endpoints ---
-@router.post(
-    "/cycles",
-    response_model=PayrollCycleResponse,
-    status_code=status.HTTP_201_CREATED,
-)
+# ---------------------------------------------------------------------------
+# Payroll cycles
+# ---------------------------------------------------------------------------
+@router.post("/cycles", response_model=PayrollCycleOut, status_code=status.HTTP_201_CREATED)
 async def create_payroll_cycle(
     payload: PayrollCycleCreate,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
 ) -> PayrollCycle:
-    """Create a new payroll cycle in DRAFT state."""
-    new_cycle = PayrollCycle(
+    cycle = PayrollCycle(
         company_id=company_id,
         name=payload.name,
         period_start=payload.period_start,
         period_end=payload.period_end,
         pay_date=payload.pay_date,
         notes=payload.notes,
-        status=PayrollCycleStatus.DRAFT,
+        status=PayrollCycleStatus.DRAFT.value,
         totals={},
     )
-    db.add(new_cycle)
+    db.add(cycle)
     try:
         await db.commit()
-        await db.refresh(new_cycle)
+        await db.refresh(cycle)
     except Exception:
         await db.rollback()
         raise
-    return new_cycle
-
-
-@router.get("/cycles", response_model=list[PayrollCycleResponse])
-async def get_payroll_cycles(
-    db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> list[PayrollCycle]:
-    """Retrieve all payroll cycles for the current company."""
-    stmt = select(PayrollCycle).where(PayrollCycle.company_id == company_id)
-    res = await db.execute(stmt)
-    return list(res.scalars().all())
-
-
-@router.get("/cycles/{id}", response_model=PayrollCycleResponse)
-async def get_payroll_cycle(
-    id: int,
-    db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> PayrollCycle:
-    """Retrieve details of a specific payroll cycle."""
-    stmt = select(PayrollCycle).where(
-        PayrollCycle.id == id, PayrollCycle.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    cycle = res.scalar_one_or_none()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payroll cycle not found",
-        )
     return cycle
 
 
-@router.post("/cycles/{id}/run")
+@router.get("/cycles", response_model=list[PayrollCycleOut])
+async def list_payroll_cycles(
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> list[PayrollCycle]:
+    rows = (
+        await db.execute(
+            select(PayrollCycle)
+            .where(
+                PayrollCycle.company_id == company_id,
+                PayrollCycle.deleted_at.is_(None),
+            )
+            .order_by(PayrollCycle.created_at.desc())
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+@router.get("/cycles/{id}", response_model=PayrollCycleOut)
+async def get_payroll_cycle(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> PayrollCycle:
+    return await payroll_service._load_cycle(db, id, company_id)
+
+
+@router.post("/cycles/{id}/run", response_model=RunResult)
 async def run_payroll_cycle(
-    id: int,
+    id: uuid.UUID,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
-) -> dict[str, Any]:
-    """Execute/run payroll calculations for all active employees for this cycle."""
-    # Ensure cycle exists and belongs to company
-    stmt = select(PayrollCycle).where(
-        PayrollCycle.id == id, PayrollCycle.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    cycle = res.scalar_one_or_none()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payroll cycle not found",
-        )
-
-    return await payroll_service.run_payroll(db, id)
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_RUN)),
+) -> dict:
+    return await payroll_service.run_payroll(db, id, company_id)
 
 
-@router.post("/cycles/{id}/approve", response_model=PayrollCycleResponse)
+@router.post("/cycles/{id}/approve", response_model=PayrollCycleOut)
 async def approve_payroll_cycle(
-    id: int,
+    id: uuid.UUID,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_APPROVE)),
 ) -> PayrollCycle:
-    """Transition cycle status from PROCESSING to APPROVED."""
-    stmt = select(PayrollCycle).where(
-        PayrollCycle.id == id, PayrollCycle.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    cycle = res.scalar_one_or_none()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payroll cycle not found",
-        )
-
-    return await payroll_service.approve_cycle(db, id)
+    return await payroll_service.approve_cycle(db, id, company_id)
 
 
-@router.post("/cycles/{id}/mark-paid", response_model=PayrollCycleResponse)
+@router.post("/cycles/{id}/mark-paid", response_model=PayrollCycleOut)
 async def mark_payroll_cycle_paid(
-    id: int,
+    id: uuid.UUID,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_PAY)),
 ) -> PayrollCycle:
-    """Transition cycle status from APPROVED to PAID, and mark all cycle payslips as PAID."""
-    stmt = select(PayrollCycle).where(
-        PayrollCycle.id == id, PayrollCycle.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    cycle = res.scalar_one_or_none()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payroll cycle not found",
-        )
-
-    return await payroll_service.mark_paid(db, id)
+    return await payroll_service.mark_paid(db, id, company_id)
 
 
-@router.delete("/cycles/{id}", response_model=PayrollCycleResponse)
+@router.post("/cycles/{id}/cancel", response_model=PayrollCycleOut)
+async def cancel_payroll_cycle(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_MANAGE)),
+) -> PayrollCycle:
+    return await payroll_service.cancel_cycle(db, id, company_id)
+
+
+@router.delete("/cycles/{id}", response_model=PayrollCycleOut)
 async def delete_payroll_cycle(
-    id: int,
+    id: uuid.UUID,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_MANAGE)),
 ) -> PayrollCycle:
-    """Delete a payroll cycle. Only draft cycles are permitted to be deleted."""
-    stmt = select(PayrollCycle).where(
-        PayrollCycle.id == id, PayrollCycle.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    cycle = res.scalar_one_or_none()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payroll cycle not found",
-        )
-
-    if cycle.status != PayrollCycleStatus.DRAFT:
+    """Soft-delete a cycle. Allowed for any status except PAID (spec §6)."""
+    cycle = await payroll_service._load_cycle(db, id, company_id)
+    if cycle.status == PayrollCycleStatus.PAID:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Only draft cycles can be deleted",
+            detail="A PAID cycle cannot be deleted",
         )
-
-    await db.delete(cycle)
+    cycle.deleted_at = datetime.utcnow()
     try:
         await db.commit()
+        await db.refresh(cycle)
     except Exception:
         await db.rollback()
         raise
     return cycle
 
 
-# --- Payslip Endpoints ---
-@router.get("/cycles/{id}/payslips", response_model=list[PayslipResponse])
-async def get_cycle_payslips(
-    id: int,
+# ---------------------------------------------------------------------------
+# Payslips
+# ---------------------------------------------------------------------------
+@router.get("/cycles/{id}/payslips", response_model=list[PayslipOut])
+async def list_cycle_payslips(
+    id: uuid.UUID,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
 ) -> list[Payslip]:
-    """Retrieve all payslips associated with the specified payroll cycle."""
-    stmt_cycle = select(PayrollCycle).where(
-        PayrollCycle.id == id, PayrollCycle.company_id == company_id
-    )
-    res_cycle = await db.execute(stmt_cycle)
-    cycle = res_cycle.scalar_one_or_none()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payroll cycle not found",
+    await payroll_service._load_cycle(db, id, company_id)
+    rows = (
+        await db.execute(
+            select(Payslip).where(
+                Payslip.cycle_id == id, Payslip.company_id == company_id
+            )
         )
-
-    stmt = select(Payslip).where(
-        Payslip.cycle_id == id, Payslip.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    return list(res.scalars().all())
+    ).scalars().all()
+    return list(rows)
 
 
-@router.get("/payslips/{id}", response_model=PayslipDetailResponse)
+@router.get("/payslips/{id}", response_model=PayslipDetailOut)
 async def get_payslip(
-    id: int,
+    id: uuid.UUID,
     db: DBSessionDep,
-    company_id: int = Depends(get_current_company_id),
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
 ) -> Payslip:
-    """Retrieve detailed information of a specific payslip, including components breakdown."""
-    stmt = select(Payslip).where(
-        Payslip.id == id, Payslip.company_id == company_id
-    )
-    res = await db.execute(stmt)
-    payslip = res.scalar_one_or_none()
-    if not payslip:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payslip not found",
+    payslip = (
+        await db.execute(
+            select(Payslip).where(Payslip.id == id, Payslip.company_id == company_id)
         )
+    ).scalar_one_or_none()
+    if not payslip:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payslip not found")
     return payslip
