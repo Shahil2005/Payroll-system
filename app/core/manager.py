@@ -19,4 +19,3 @@ async def lifespan(app: FastAPI) -> AsyncIterator[Any]:  # noqa: ARG001
     if DBSessionManager.engine is not None:
         # Close the DB connection
         await DBSessionManager.close()
-

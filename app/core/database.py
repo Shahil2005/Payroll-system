@@ -4,10 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends
 from loguru import logger
-from pydantic_settings import (
-    BaseSettings,
-    SettingsConfigDict,
-)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -27,6 +24,9 @@ class DBSettings(BaseSettings):
     db_password: str = ""
     db_host: str = "localhost"
     db_port: int = 5433
+    # Emit every SQL statement to the log. Off by default (noisy + leaks
+    # parameter values); enable in local dev via SQL_ECHO=true.
+    sql_echo: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -47,10 +47,11 @@ def get_engine(host: str, **engine_kwargs: Any) -> AsyncEngine:
 
 engine = get_engine(
     _DBSettings.db_url,
-    echo=True,
+    echo=_DBSettings.sql_echo,
     pool_size=10,  # Up to 10 persistent connections
     max_overflow=20,  # Up to 20 temporary additional connections
     pool_timeout=30,  # Idle timeout for connections
+    pool_pre_ping=True,  # Recycle dead connections instead of erroring mid-request
 )
 
 
@@ -67,10 +68,11 @@ class DatabaseSessionManager:
         """Re-create engine and sessionmaker (needed after close())."""
         self.engine = get_engine(
             _DBSettings.db_url,
-            echo=True,
+            echo=_DBSettings.sql_echo,
             pool_size=10,
             max_overflow=20,
             pool_timeout=30,
+            pool_pre_ping=True,
         )
         self._sessionmaker = async_sessionmaker(
             autocommit=False, class_=AsyncSession, autoflush=False, bind=self.engine

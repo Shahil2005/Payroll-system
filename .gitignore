@@ -39,8 +39,10 @@ data/db/
 data/logs/
 *.log
 
-# ----- Alembic (auto-generated during dev) -----
-alembic/versions/*
+# ----- Alembic -----
+# Migration scripts MUST be version-controlled (they define the prod schema).
+# Only ignore the bytecode cache, not the migrations themselves.
+alembic/versions/__pycache__/
 
 # ----- Editor / OS -----
 .vscode/

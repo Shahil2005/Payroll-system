@@ -9,6 +9,8 @@ import hashlib
 import hmac
 import os
 import uuid
+# NOTE: `timezone.utc` (not `datetime.UTC`) so this stays importable on
+# Python 3.10 — `datetime.UTC` is 3.11+ only (ruff UP017 silenced at the call site).
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -26,12 +28,7 @@ _ALGO_TAG = "pbkdf2_sha256"
 def hash_password(password: str) -> str:
     salt = os.urandom(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ITERATIONS)
-    return "{}${}${}${}".format(
-        _ALGO_TAG,
-        _PBKDF2_ITERATIONS,
-        base64.b64encode(salt).decode(),
-        base64.b64encode(dk).decode(),
-    )
+    return f"{_ALGO_TAG}${_PBKDF2_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
@@ -49,7 +46,7 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ----- JWT ------------------------------------------------------------------
 def create_access_token(*, user_id: uuid.UUID, company_id: uuid.UUID, role: str) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "company_id": str(company_id),

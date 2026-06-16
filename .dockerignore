@@ -1,0 +1,37 @@
+# Version control / CI
+.git
+.github
+
+# Python caches & envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+ENV/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local secrets & runtime data
+.env
+data/
+*.log
+*.zip
+ssl/
+*.pem
+
+# Frontend (built/served separately)
+frontend/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

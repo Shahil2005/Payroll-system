@@ -105,8 +105,8 @@ export default function StructuresPage() {
   };
 
   const estimate = useMemo(
-    () => estimateSalary(toMoneyLines(earnings), toMoneyLines(deductions)),
-    [earnings, deductions]
+    () => estimateSalary(toMoneyLines(earnings), toMoneyLines(deductions), Number(lopDays) || 0),
+    [earnings, deductions, lopDays]
   );
   const earningCodes = earnings.map((e) => e.code).filter(Boolean);
 
@@ -333,7 +333,9 @@ export default function StructuresPage() {
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
               <div className="mb-2 flex items-center justify-between">
                 <span className="font-semibold">Estimated Monthly Salary</span>
-                <span className="text-xs text-[var(--color-muted)]">full month · before LOP</span>
+                <span className="text-xs text-[var(--color-muted)]">
+                  {Number(lopDays) > 0 ? `after ${Number(lopDays)} LOP day(s) · 30-day basis` : "full month · no LOP"}
+                </span>
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <Stat label="Gross" value={inr(estimate.gross, currency)} />

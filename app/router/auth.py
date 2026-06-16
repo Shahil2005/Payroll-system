@@ -4,12 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 
 from app.constants import Permission, permissions_for
-from app.core.dependencies import (
-    CurrentUserDep,
-    DBSessionDep,
-    get_current_company_id,
-    require_permission,
-)
+from app.core.dependencies import CurrentUserDep, DBSessionDep, get_current_company_id, require_permission
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User
 from app.schema.auth import LoginRequest, TokenResponse, UserCreate, UserOut

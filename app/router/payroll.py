@@ -5,11 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 
 from app.constants import PayrollCycleStatus, Permission
-from app.core.dependencies import (
-    DBSessionDep,
-    get_current_company_id,
-    require_permission,
-)
+from app.core.dependencies import DBSessionDep, get_current_company_id, require_permission
 from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
 from app.schema.payroll import (
     DashboardSummary,

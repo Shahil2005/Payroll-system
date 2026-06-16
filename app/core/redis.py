@@ -11,18 +11,27 @@ from app import logger
 class RedisHelper:
     """Helper class for Redis operations."""
 
-    def __init__(self, host: str = "localhost", port: int = 6379, db: int = 0) -> None:
+    def __init__(self, host: str | None = None, port: int | None = None, db: int = 0) -> None:
         """Initialize Redis connection.
+
+        Host/port fall back to REDIS_HOST/REDIS_PORT env vars (then sensible
+        local defaults), so the same code works in containers and locally.
 
         Args:
         ----
-            host: Redis host address
-            port: Redis port number
+            host: Redis host address (defaults to REDIS_HOST or localhost)
+            port: Redis port number (defaults to REDIS_PORT or 6379)
             db: Redis database number
 
         """
+        resolved_host: str = host or os.getenv("REDIS_HOST") or "localhost"
+        resolved_port: int = port or int(os.getenv("REDIS_PORT") or "6379")
         self.redis_client = Redis(
-            host=host, port=port, db=db, decode_responses=True, password=os.getenv("REDIS_PASSWORD")
+            host=resolved_host,
+            port=resolved_port,
+            db=db,
+            decode_responses=True,
+            password=os.getenv("REDIS_PASSWORD"),
         )
 
     async def set(self, key: str, value: Any, *, expire: int | None = None, to_json: bool = False) -> bool:

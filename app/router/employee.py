@@ -5,11 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 
 from app.constants import Permission
-from app.core.dependencies import (
-    DBSessionDep,
-    get_current_company_id,
-    require_permission,
-)
+from app.core.dependencies import DBSessionDep, get_current_company_id, require_permission
 from app.models.employee import Employee
 from app.models.payroll import SalaryStructure
 from app.schema.employee import EmployeeCreate, EmployeeOut, EmployeeUpdate
@@ -157,4 +153,4 @@ async def delete_employee(
     except Exception:
         await db.rollback()
         raise
-    return None
+    return

@@ -7,12 +7,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import (
-    DEFAULT_WORKING_DAYS,
-    LineType,
-    PayrollCycleStatus,
-    PayslipStatus,
-)
+from app.constants import DEFAULT_WORKING_DAYS, LineType, PayrollCycleStatus, PayslipStatus
 from app.models.employee import Employee
 from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
 

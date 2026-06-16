@@ -274,20 +274,41 @@ export interface SalaryEstimate {
   deductions: ResolvedLine[];
 }
 
-/** Client-side full-month estimate mirroring the backend compute_payslip. */
+/** Default working-days basis (mirrors backend DEFAULT_WORKING_DAYS). */
+export const WORKING_DAYS = 30;
+
+/** Client-side estimate mirroring the backend compute_payslip, including LOP
+ *  proration of earnings (deductions are not pro-rated). */
 export function estimateSalary(
   components: MoneyLine[],
-  deductions: MoneyLine[]
+  deductions: MoneyLine[],
+  lopDays = 0,
+  workingDays = WORKING_DAYS
 ): SalaryEstimate {
+  const lop = Math.max(0, Math.min(Number(lopDays) || 0, workingDays));
+  const multiplier = lop > 0 ? (workingDays - lop) / workingDays : 1;
+
+  // Pass 1: resolve earnings on the raw (un-prorated) basis.
+  const rawByCode: Record<string, number> = {};
+  let rawGross = 0;
+  const rawLines: { code: string; label: string; amount: number }[] = [];
+  for (const line of components || []) {
+    if (!line.code?.trim()) continue;
+    const amt = round2(resolveOne(line, rawByCode, rawGross));
+    rawByCode[line.code] = amt;
+    rawGross = round2(rawGross + amt);
+    rawLines.push({ code: line.code, label: line.label || line.code, amount: amt });
+  }
+
+  // Apply LOP proration uniformly to each earning line.
   const byCode: Record<string, number> = {};
   let gross = 0;
   const earnings: ResolvedLine[] = [];
-  for (const line of components || []) {
-    if (!line.code?.trim()) continue;
-    const amt = round2(resolveOne(line, byCode, gross));
-    byCode[line.code] = amt;
+  for (const { code, label, amount } of rawLines) {
+    const amt = round2(amount * multiplier);
+    byCode[code] = amt;
     gross = round2(gross + amt);
-    earnings.push({ code: line.code, label: line.label || line.code, amount: amt });
+    earnings.push({ code, label, amount: amt });
   }
   const dedRef = { ...byCode };
   let totalDeductions = 0;
