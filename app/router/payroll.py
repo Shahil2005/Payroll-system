@@ -548,7 +548,7 @@ async def email_cycle_payslips(
     if not email_service.is_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Email is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL.",
+            detail="Email is not configured. Set SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM_EMAIL.",
         )
 
     payslips = (

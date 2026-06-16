@@ -519,11 +519,48 @@ def test_payslip_pdf_download() -> None:
         assert "attachment" in r.headers.get("content-disposition", "")
 
 
+def _configure_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import email_service
+
+    monkeypatch.setattr(email_service._settings, "smtp_host", "smtp.test")
+    monkeypatch.setattr(email_service._settings, "smtp_port", 587)
+    monkeypatch.setattr(email_service._settings, "smtp_use_ssl", False)
+    monkeypatch.setattr(email_service._settings, "smtp_username", "payroll@test.dev")
+    monkeypatch.setattr(email_service._settings, "smtp_password", "app-password")
+    monkeypatch.setattr(email_service._settings, "smtp_from_email", "payroll@test.dev")
+
+
+class _FakeSMTP:
+    """Stand-in for smtplib.SMTP capturing the sent message (no network)."""
+
+    sent: list[Any] = []
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+
+    def __enter__(self) -> "_FakeSMTP":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def starttls(self, context: object = None) -> None:
+        pass
+
+    def login(self, user: str, password: str) -> None:
+        self.user = user
+
+    def send_message(self, msg: Any) -> None:
+        _FakeSMTP.sent.append(msg)
+
+
 def test_email_payslip_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import email_service
 
-    monkeypatch.setattr(email_service._settings, "resend_api_key", "")
-    monkeypatch.setattr(email_service._settings, "resend_from_email", "")
+    monkeypatch.setattr(email_service._settings, "smtp_username", "")
+    monkeypatch.setattr(email_service._settings, "smtp_password", "")
+    monkeypatch.setattr(email_service._settings, "smtp_from_email", "")
     with authed_client() as c:
         slip = _paid_payslip(c)
         r = c.post(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/email")
@@ -533,15 +570,10 @@ def test_email_payslip_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_email_payslip_success(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import email_service
 
-    monkeypatch.setattr(email_service._settings, "resend_api_key", "test_key")
-    monkeypatch.setattr(email_service._settings, "resend_from_email", "payroll@test.dev")
-    captured: dict[str, Any] = {}
+    _configure_smtp(monkeypatch)
+    _FakeSMTP.sent = []
+    monkeypatch.setattr(email_service.smtplib, "SMTP", _FakeSMTP)
 
-    def fake_send(params: dict[str, Any]) -> dict[str, str]:
-        captured["params"] = params
-        return {"id": "email_123"}
-
-    monkeypatch.setattr(email_service.resend.Emails, "send", fake_send)
     with authed_client() as c:
         slip = _paid_payslip(c)
         r = c.post(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/email")
@@ -549,9 +581,14 @@ def test_email_payslip_success(monkeypatch: pytest.MonkeyPatch) -> None:
         body = r.json()
         assert body["sent"] is True
         assert body["to"] == "john@example.com"
-        # The PDF was attached and the recipient was correct.
-        assert captured["params"]["to"] == ["john@example.com"]
-        assert captured["params"]["attachments"][0]["filename"].endswith(".pdf")
+        # One message was sent, addressed correctly, with the PDF attached.
+        assert len(_FakeSMTP.sent) == 1
+        msg = _FakeSMTP.sent[0]
+        assert msg["To"] == "john@example.com"
+        attachments = [p for p in msg.iter_attachments()]
+        assert len(attachments) == 1
+        assert attachments[0].get_filename().endswith(".pdf")
+        assert attachments[0].get_content_type() == "application/pdf"
 
 
 def test_email_payslip_requires_paid_cycle() -> None:

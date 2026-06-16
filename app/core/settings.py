@@ -19,12 +19,16 @@ class Settings(BaseSettings):
     # Comma-separated list of allowed browser origins. Defaults to local dev.
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    # ----- Email (Resend) -----
-    # Set RESEND_API_KEY + RESEND_FROM_EMAIL in the env to enable payslip email.
-    # The from-email's domain must be verified in your Resend account.
-    resend_api_key: str = ""
-    resend_from_email: str = ""
-    resend_from_name: str = "Croar Payroll"
+    # ----- Email (SMTP — Google/Gmail) -----
+    # Set SMTP_USERNAME + SMTP_PASSWORD (a Google App Password) and
+    # SMTP_FROM_EMAIL in the env to enable payslip email.
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587  # 587 = STARTTLS (default), 465 = SSL (set smtp_use_ssl)
+    smtp_use_ssl: bool = False
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Croar Payroll"
 
     model_config = SettingsConfigDict(
         env_file=".env",
