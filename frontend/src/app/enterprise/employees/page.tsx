@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { payrollApi, type Employee } from "@/utils/api";
+import { payrollApi, PT_STATES, type Employee } from "@/utils/api";
 import { Banner, Modal } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
 import { useDialog } from "@/components/DialogProvider";
@@ -23,6 +23,11 @@ export default function EmployeesPage() {
     last_name: "",
     email: "",
     employee_id: "",
+    pan: "",
+    uan: "",
+    esic_number: "",
+    state: "",
+    date_of_joining: "",
   });
 
   async function load() {
@@ -51,9 +56,24 @@ export default function EmployeesPage() {
         last_name: form.last_name,
         email: form.email,
         employee_id: form.employee_id || null,
+        pan: form.pan || null,
+        uan: form.uan || null,
+        esic_number: form.esic_number || null,
+        state: form.state || null,
+        date_of_joining: form.date_of_joining || null,
       });
       setOpen(false);
-      setForm({ first_name: "", last_name: "", email: "", employee_id: "" });
+      setForm({
+        first_name: "",
+        last_name: "",
+        email: "",
+        employee_id: "",
+        pan: "",
+        uan: "",
+        esic_number: "",
+        state: "",
+        date_of_joining: "",
+      });
       await load();
     } catch (err) {
       setFormErr((err as Error).message);
@@ -172,6 +192,51 @@ export default function EmployeesPage() {
               <span className="lbl">Employee Code (optional)</span>
               <input className="input" value={form.employee_id} onChange={(e) => setForm({ ...form, employee_id: e.target.value })} />
             </label>
+
+            <div className="mt-1 border-t border-[var(--color-border)] pt-3">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Statutory details (for PF / ESI / Professional Tax)
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">PAN</span>
+                  <input
+                    className="input uppercase"
+                    maxLength={10}
+                    value={form.pan}
+                    onChange={(e) => setForm({ ...form, pan: e.target.value.toUpperCase() })}
+                  />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">State (PT)</span>
+                  <select
+                    className="input"
+                    value={form.state}
+                    onChange={(e) => setForm({ ...form, state: e.target.value })}
+                  >
+                    <option value="">— Select —</option>
+                    {PT_STATES.map((s) => (
+                      <option key={s.code} value={s.code}>
+                        {s.label} ({s.code})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">UAN (PF)</span>
+                  <input className="input" maxLength={20} value={form.uan} onChange={(e) => setForm({ ...form, uan: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">ESIC Number</span>
+                  <input className="input" maxLength={20} value={form.esic_number} onChange={(e) => setForm({ ...form, esic_number: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">Date of Joining</span>
+                  <input className="input" type="date" value={form.date_of_joining} onChange={(e) => setForm({ ...form, date_of_joining: e.target.value })} />
+                </label>
+              </div>
+            </div>
+
             <div className="flex gap-3">
               <button type="submit" disabled={saving} className="btn-primary">
                 {saving ? "Adding…" : "Add Employee"}

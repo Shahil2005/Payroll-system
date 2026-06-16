@@ -45,6 +45,17 @@ class SalaryStructure(Base, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(default=True)
 
+    # ----- Statutory toggles (Phase 1) -----
+    # Off by default so existing structures compute exactly as before until HR
+    # opts in. `pf_wage_codes` lists which earning codes form the PF wage base
+    # (defaults to ["BASIC"] when null). PT applicability follows the employee's
+    # state when `pt_enabled`.
+    pf_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    pf_cap_at_ceiling: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
+    pf_wage_codes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True, default=None)
+    esi_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    pt_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+
     employee: Mapped["Employee"] = relationship(back_populates="salary_structures")
 
     __table_args__ = (
@@ -123,6 +134,14 @@ class Payslip(Base, TimestampMixin):
     # Resolved line items [{code,label,amount}] (snapshot)
     earnings: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     deductions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    # Employer-side statutory cost [{code,label,amount}] — not deducted from the
+    # employee; informational/CTC (e.g. employer PF, ESI). Snapshot at run time.
+    employer_contributions: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True, default=list
+    )
+    # Statutory computation snapshot: ruleset version + per-head breakdown, so a
+    # re-rendered payslip reflects the rules that applied when it was run.
+    statutory: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True, default=None)
     currency: Mapped[str] = mapped_column(String(8), default="INR")
     status: Mapped[str] = mapped_column(
         String(16),

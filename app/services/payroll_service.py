@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import DEFAULT_WORKING_DAYS, LineType, PayrollCycleStatus, PayslipStatus
 from app.models.employee import Employee
 from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
+from app.services import statutory as statutory_rules
 
 
 def _q(amount: Decimal) -> Decimal:
@@ -44,15 +45,20 @@ def compute_payslip(
     structure: SalaryStructure,
     lop_days: Decimal,
     working_days: Decimal,
+    *,
+    pt_state: str | None = None,
 ) -> dict[str, Any]:
     """Pure payslip calculation (spec §5).
 
     1. Resolve each earning line (fixed / percent-of-code / percent-of-gross).
     2. gross = sum(earnings); pro-rate by paid/working days when lop_days > 0.
     3. Resolve deductions the same way (percent_of a code, or percent of gross).
-    4. net = gross - deductions.
+    4. Apply statutory deductions (PF/ESI/PT) when enabled on the structure.
+    5. net = gross - (voluntary + statutory) deductions.
 
-    Each resolved line is rounded to 2 dp before summing (avoids cent drift).
+    Statutory is opt-in per structure; with all toggles off the result is
+    identical to the pre-statutory calculation. Each resolved line is rounded to
+    2 dp before summing (avoids cent drift).
     """
     if working_days <= 0:
         raise ValueError("working_days must be greater than zero")
@@ -96,6 +102,55 @@ def compute_payslip(
         total_deductions = _q(total_deductions + amt)
         deductions.append({"code": code, "label": line.get("label", code), "amount": float(amt)})
 
+    # --- Statutory (PF / ESI / PT) — opt-in per structure ---
+    employer_contributions: list[dict[str, Any]] = []
+    statutory: dict[str, Any] = {"version": statutory_rules.RULESET_VERSION}
+
+    if structure.pf_enabled:
+        codes = structure.pf_wage_codes or ["BASIC"]
+        pf_wage = sum((by_code.get(c, Decimal("0")) for c in codes), Decimal("0.00"))
+        if pf_wage <= 0:  # fall back to gross if the named codes aren't present
+            pf_wage = gross
+        cap = True if structure.pf_cap_at_ceiling is None else bool(structure.pf_cap_at_ceiling)
+        pf = statutory_rules.compute_pf(pf_wage, cap_at_ceiling=cap)
+        deductions.append(
+            {"code": "PF", "label": "Provident Fund (Employee)", "amount": float(pf["employee"])}
+        )
+        total_deductions = _q(total_deductions + pf["employee"])
+        employer_contributions.append(
+            {"code": "PF_ER", "label": "Provident Fund (Employer)", "amount": float(pf["employer_epf"])}
+        )
+        employer_contributions.append(
+            {"code": "EPS_ER", "label": "Pension (EPS, Employer)", "amount": float(pf["employer_eps"])}
+        )
+        statutory["pf"] = {k: float(v) for k, v in pf.items()}
+
+    if structure.esi_enabled:
+        esi = statutory_rules.compute_esi(gross)
+        statutory["esi"] = {
+            "covered": esi["covered"],
+            "employee": float(esi["employee"]),
+            "employer": float(esi["employer"]),
+        }
+        if esi["covered"]:
+            deductions.append({"code": "ESI", "label": "ESI (Employee)", "amount": float(esi["employee"])})
+            total_deductions = _q(total_deductions + esi["employee"])
+            employer_contributions.append(
+                {"code": "ESI_ER", "label": "ESI (Employer)", "amount": float(esi["employer"])}
+            )
+
+    if structure.pt_enabled:
+        pt = statutory_rules.compute_pt(pt_state, gross)
+        statutory["pt"] = {"amount": float(pt["amount"]), "state": pt["state"], "note": pt["note"]}
+        if pt["amount"] > 0:
+            deductions.append(
+                {"code": "PT", "label": "Professional Tax", "amount": float(pt["amount"])}
+            )
+            total_deductions = _q(total_deductions + pt["amount"])
+
+    employer_total = sum(
+        (Decimal(str(c["amount"])) for c in employer_contributions), Decimal("0.00")
+    )
     net_pay = _q(gross - total_deductions)
 
     return {
@@ -106,6 +161,9 @@ def compute_payslip(
         "net_pay": net_pay,
         "lop_days": lop_days,
         "paid_days": paid_days,
+        "employer_contributions": employer_contributions,
+        "employer_total": _q(employer_total),
+        "statutory": statutory,
     }
 
 
@@ -296,7 +354,9 @@ async def run_payroll(
         lop_days = Decimal(str(struct.lop_days or "0"))
 
         try:
-            computed = compute_payslip(struct, lop_days, working_days)
+            computed = compute_payslip(
+                struct, lop_days, working_days, pt_state=employee.state
+            )
         except ValueError as exc:
             skipped.append({"employee_id": employee.id, "reason": str(exc)})
             continue
@@ -309,6 +369,8 @@ async def run_payroll(
             existing.paid_days = computed["paid_days"]
             existing.earnings = computed["earnings"]
             existing.deductions = computed["deductions"]
+            existing.employer_contributions = computed["employer_contributions"]
+            existing.statutory = computed["statutory"]
             existing.currency = struct.currency
             existing.status = PayslipStatus.PENDING.value
             updated_count += 1
@@ -325,6 +387,8 @@ async def run_payroll(
                     paid_days=computed["paid_days"],
                     earnings=computed["earnings"],
                     deductions=computed["deductions"],
+                    employer_contributions=computed["employer_contributions"],
+                    statutory=computed["statutory"],
                     currency=struct.currency,
                     status=PayslipStatus.PENDING.value,
                 )
@@ -341,12 +405,23 @@ async def run_payroll(
     total_gross = sum((p.gross_earnings for p in all_payslips), Decimal("0.00"))
     total_ded = sum((p.total_deductions for p in all_payslips), Decimal("0.00"))
     total_net = sum((p.net_pay for p in all_payslips), Decimal("0.00"))
+    total_employer = sum(
+        (
+            Decimal(str(c.get("amount", 0)))
+            for p in all_payslips
+            for c in (p.employer_contributions or [])
+        ),
+        Decimal("0.00"),
+    )
 
     cycle.totals = {
         "headcount": len(all_payslips),
         "gross": float(total_gross),
         "deductions": float(total_ded),
         "net": float(total_net),
+        # Employer-side statutory cost and total cost-to-company for the cycle.
+        "employer_cost": float(total_employer),
+        "total_cost": float(total_gross + total_employer),
     }
     cycle.status = PayrollCycleStatus.PROCESSING.value
 

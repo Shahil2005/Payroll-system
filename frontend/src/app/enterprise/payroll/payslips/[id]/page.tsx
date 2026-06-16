@@ -10,14 +10,44 @@ import {
   type Payslip,
 } from "@/utils/api";
 import { Banner, PayslipBadge } from "@/components/ui";
+import { useAuth } from "@/components/AuthProvider";
 
 export default function PayslipDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const { can } = useAuth();
   const [slip, setSlip] = useState<Payslip | null>(null);
   const [cycle, setCycle] = useState<PayrollCycle | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [emailing, setEmailing] = useState(false);
+  const [notice, setNotice] = useState<{ tone: "ok" | "err"; msg: string } | null>(null);
+
+  async function handleDownload() {
+    setDownloading(true);
+    setNotice(null);
+    try {
+      await payrollApi.downloadPayslipPdf(id);
+    } catch (err) {
+      setNotice({ tone: "err", msg: (err as Error).message });
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function handleEmail() {
+    setEmailing(true);
+    setNotice(null);
+    try {
+      const res = await payrollApi.emailPayslip(id);
+      setNotice({ tone: "ok", msg: `Payslip emailed to ${res.to}.` });
+    } catch (err) {
+      setNotice({ tone: "err", msg: (err as Error).message });
+    } finally {
+      setEmailing(false);
+    }
+  }
 
   useEffect(() => {
     (async () => {
@@ -44,17 +74,49 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
 
   return (
     <div className="animate-fade-in flex flex-col gap-6">
-      <header className="flex items-center justify-between no-print">
+      <header className="flex flex-wrap items-center justify-between gap-3 no-print">
         <Link href={`/enterprise/payroll/${slip.cycle_id}`} className="inline-flex items-center gap-1 text-sm text-[var(--color-primary)]">
           <span className="material-symbols-outlined text-[18px]">arrow_back</span> Back to Cycle
         </Link>
-        <button
-          onClick={() => window.print()}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]"
-        >
-          <span className="material-symbols-outlined text-[18px]">print</span> Print
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleDownload}
+            disabled={downloading}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] px-4 py-2 text-sm font-semibold text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:opacity-60"
+          >
+            <span className="material-symbols-outlined text-[18px]">download</span>
+            {downloading ? "Preparing…" : "Download PDF"}
+          </button>
+          {can("payroll:pay") && (
+            <button
+              onClick={handleEmail}
+              disabled={emailing}
+              className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] px-4 py-2 text-sm font-semibold text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:opacity-60"
+            >
+              <span className="material-symbols-outlined text-[18px]">mail</span>
+              {emailing ? "Sending…" : "Email to Employee"}
+            </button>
+          )}
+          <button
+            onClick={() => window.print()}
+            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]"
+          >
+            <span className="material-symbols-outlined text-[18px]">print</span> Print
+          </button>
+        </div>
       </header>
+
+      {notice && (
+        <div className="no-print">
+          {notice.tone === "ok" ? (
+            <div className="rounded-xl border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-3 text-sm text-[var(--color-accent)]">
+              {notice.msg}
+            </div>
+          ) : (
+            <Banner>{notice.msg}</Banner>
+          )}
+        </div>
+      )}
 
       <div className="mx-auto w-full max-w-3xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-8 print:border-0">
         <div className="mb-6 flex items-start justify-between border-b border-[var(--color-border)] pb-5">
@@ -80,6 +142,18 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
           <Breakdown title="Earnings" lines={slip.earnings ?? []} currency={slip.currency} total={Number(slip.gross_earnings)} totalLabel="Gross Earnings" />
           <Breakdown title="Deductions" lines={slip.deductions ?? []} currency={slip.currency} total={Number(slip.total_deductions)} totalLabel="Total Deductions" negative />
         </div>
+
+        {slip.employer_contributions && slip.employer_contributions.length > 0 && (
+          <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+            <Breakdown
+              title="Employer Contributions (not deducted)"
+              lines={slip.employer_contributions}
+              currency={slip.currency}
+              total={slip.employer_contributions.reduce((sum, l) => sum + Number(l.amount), 0)}
+              totalLabel="Total Employer Cost"
+            />
+          </div>
+        )}
 
         <div className="mt-6 grid grid-cols-3 gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4 text-center text-sm">
           <Info label="Working Days" value={String(DEFAULT_WD)} center />

@@ -80,6 +80,11 @@ export default function StructuresPage() {
   const [earnings, setEarnings] = useState<LineDraft[]>([]);
   const [deductions, setDeductions] = useState<LineDraft[]>([]);
   const [lopDays, setLopDays] = useState("0");
+  // Statutory toggles (Phase 1)
+  const [pfEnabled, setPfEnabled] = useState(false);
+  const [pfCap, setPfCap] = useState(true);
+  const [esiEnabled, setEsiEnabled] = useState(false);
+  const [ptEnabled, setPtEnabled] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -121,8 +126,12 @@ export default function StructuresPage() {
       { ...emptyLine(), code: "BASIC", label: "Basic", type: "fixed", amount: "40000" },
       { ...emptyLine(), code: "HRA", label: "HRA", type: "percent", percent: "40", percent_of: "BASIC" },
     ]);
-    setDeductions([{ ...emptyLine(), code: "PF", label: "Provident Fund", type: "fixed", amount: "1800" }]);
+    setDeductions([]);
     setLopDays("0");
+    setPfEnabled(false);
+    setPfCap(true);
+    setEsiEnabled(false);
+    setPtEnabled(false);
     setFormErr(null);
     setOpen(true);
   }
@@ -137,6 +146,10 @@ export default function StructuresPage() {
     setEarnings(fromMoneyLines(s.components));
     setDeductions(fromMoneyLines(s.default_deductions));
     setLopDays(String(s.lop_days ?? 0));
+    setPfEnabled(s.pf_enabled ?? false);
+    setPfCap(s.pf_cap_at_ceiling ?? true);
+    setEsiEnabled(s.esi_enabled ?? false);
+    setPtEnabled(s.pt_enabled ?? false);
     setFormErr(null);
     setOpen(true);
   }
@@ -157,6 +170,10 @@ export default function StructuresPage() {
       default_deductions: toMoneyLines(deductions),
       lop_days: Number(lopDays) || 0,
       is_active: true,
+      pf_enabled: pfEnabled,
+      pf_cap_at_ceiling: pfCap,
+      esi_enabled: esiEnabled,
+      pt_enabled: ptEnabled,
     };
     setSaving(true);
     try {
@@ -328,6 +345,39 @@ export default function StructuresPage() {
                 </label>
               }
             />
+
+            {/* Statutory compliance (Phase 1: PF / ESI / PT) */}
+            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <span className="font-semibold">Statutory Compliance</span>
+                <span className="text-xs text-[var(--color-muted)]">computed automatically when enabled</span>
+              </div>
+              <div className="flex flex-col gap-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={pfEnabled} onChange={(e) => setPfEnabled(e.target.checked)} />
+                  <span>Provident Fund (EPF) — 12% employee + employer</span>
+                </label>
+                {pfEnabled && (
+                  <label className="ml-6 flex items-center gap-2 text-sm text-[var(--color-muted)]">
+                    <input type="checkbox" checked={pfCap} onChange={(e) => setPfCap(e.target.checked)} />
+                    <span>Cap PF wage at the ₹15,000 statutory ceiling</span>
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={esiEnabled} onChange={(e) => setEsiEnabled(e.target.checked)} />
+                  <span>ESI — 0.75% employee + 3.25% employer (only if gross ≤ ₹21,000)</span>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={ptEnabled} onChange={(e) => setPtEnabled(e.target.checked)} />
+                  <span>Professional Tax — by the employee&apos;s state</span>
+                </label>
+              </div>
+              <p className="mt-3 text-xs text-[var(--color-muted)]">
+                Statutory amounts are calculated at run time and shown as locked lines on the payslip —
+                don&apos;t also add them as manual deduction lines above. The live estimate below excludes
+                statutory; the payslip shows the exact figures.
+              </p>
+            </div>
 
             {/* Live estimate */}
             <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">

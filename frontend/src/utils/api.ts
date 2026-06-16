@@ -37,6 +37,12 @@ export interface SalaryStructure {
   default_deductions: MoneyLine[];
   lop_days: number | string;
   is_active: boolean;
+  // Statutory toggles (Phase 1)
+  pf_enabled: boolean;
+  pf_cap_at_ceiling: boolean;
+  pf_wage_codes: string[] | null;
+  esi_enabled: boolean;
+  pt_enabled: boolean;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -88,6 +94,8 @@ export interface Payslip {
   updated_at: string;
   earnings?: ResolvedLine[];
   deductions?: ResolvedLine[];
+  employer_contributions?: ResolvedLine[];
+  statutory?: Record<string, unknown> | null;
 }
 
 export interface Employee {
@@ -98,10 +106,26 @@ export interface Employee {
   last_name: string;
   email: string;
   payment_information: Record<string, unknown> | null;
+  // Statutory identifiers / drivers (Phase 1)
+  pan: string | null;
+  uan: string | null;
+  esic_number: string | null;
+  state: string | null;
+  date_of_joining: string | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
 }
+
+// Indian state codes with a configured Professional Tax schedule (backend
+// app/services/statutory.py). Others are accepted but yield ₹0 PT.
+export const PT_STATES: { code: string; label: string }[] = [
+  { code: "KA", label: "Karnataka" },
+  { code: "MH", label: "Maharashtra" },
+  { code: "WB", label: "West Bengal" },
+  { code: "TG", label: "Telangana" },
+  { code: "AP", label: "Andhra Pradesh" },
+];
 
 export interface SkippedEmployee {
   employee_id: string;
@@ -138,6 +162,22 @@ export interface RunResult {
   created: number;
   updated: number;
   skipped: SkippedEmployee[];
+}
+
+export interface EmailResult {
+  sent: boolean;
+  to: string;
+}
+
+export interface EmailFailure {
+  payslip_id: string;
+  employee_id: string;
+  reason: string;
+}
+
+export interface BulkEmailResult {
+  sent: number;
+  failed: EmailFailure[];
 }
 
 function authHeaders(): Record<string, string> {
@@ -189,6 +229,38 @@ export const apiClient = {
     }).then(handle<T>),
 };
 
+// Fetch a binary file with auth and trigger a browser download. Reuses the
+// 401 handling shape of handle() but keeps the body as a Blob.
+async function downloadFile(path: string): Promise<void> {
+  const res = await fetch(`${API_ROOT}${path}`, { headers: { ...authHeaders() } });
+  if (!res.ok) {
+    if (res.status === 401 && typeof window !== "undefined") {
+      clearSession();
+      if (!window.location.pathname.startsWith("/login")) window.location.href = "/login";
+    }
+    let msg = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      msg = body.detail || body.message || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^"]+)"?/);
+  const filename = match ? match[1] : "download.pdf";
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 const P = "/api/v1/enterprise/payroll";
 const E = "/api/v1/enterprise/employees";
 
@@ -223,6 +295,10 @@ export const payrollApi = {
   listCyclePayslips: (cycleId: string) =>
     apiClient.get<Payslip[]>(`${P}/cycles/${cycleId}/payslips`),
   getPayslip: (id: string) => apiClient.get<Payslip>(`${P}/payslips/${id}`),
+  downloadPayslipPdf: (id: string) => downloadFile(`${P}/payslips/${id}/pdf`),
+  emailPayslip: (id: string) => apiClient.post<EmailResult>(`${P}/payslips/${id}/email`),
+  emailCyclePayslips: (cycleId: string) =>
+    apiClient.post<BulkEmailResult>(`${P}/cycles/${cycleId}/email-payslips`),
 
   // Employees
   listEmployees: () => apiClient.get<Employee[]>(E),

@@ -494,3 +494,205 @@ def test_dashboard_summary() -> None:
 def test_dashboard_requires_auth() -> None:
     with TestClient(app) as c:
         assert c.get("/api/v1/enterprise/payroll/dashboard").status_code == status.HTTP_401_UNAUTHORIZED
+
+
+# ---------------------------------------------------------------------------
+# Payslip PDF + email
+# ---------------------------------------------------------------------------
+def _paid_payslip(c: TestClient, employee_id: str = EMP1) -> dict[str, Any]:
+    """Drive a cycle to PAID and return the resulting (released) payslip."""
+    _create_structure(c, employee_id=employee_id)
+    cid = _create_cycle(c)["id"]
+    assert c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run").status_code == status.HTTP_200_OK
+    c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+    c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+    return c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()[0]
+
+
+def test_payslip_pdf_download() -> None:
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        r = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/pdf")
+        assert r.status_code == status.HTTP_200_OK
+        assert r.headers["content-type"] == "application/pdf"
+        assert r.content[:4] == b"%PDF"
+        assert "attachment" in r.headers.get("content-disposition", "")
+
+
+def test_email_payslip_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import email_service
+
+    monkeypatch.setattr(email_service._settings, "resend_api_key", "")
+    monkeypatch.setattr(email_service._settings, "resend_from_email", "")
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        r = c.post(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/email")
+        assert r.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+def test_email_payslip_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import email_service
+
+    monkeypatch.setattr(email_service._settings, "resend_api_key", "test_key")
+    monkeypatch.setattr(email_service._settings, "resend_from_email", "payroll@test.dev")
+    captured: dict[str, Any] = {}
+
+    def fake_send(params: dict[str, Any]) -> dict[str, str]:
+        captured["params"] = params
+        return {"id": "email_123"}
+
+    monkeypatch.setattr(email_service.resend.Emails, "send", fake_send)
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        r = c.post(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/email")
+        assert r.status_code == status.HTTP_200_OK, r.text
+        body = r.json()
+        assert body["sent"] is True
+        assert body["to"] == "john@example.com"
+        # The PDF was attached and the recipient was correct.
+        assert captured["params"]["to"] == ["john@example.com"]
+        assert captured["params"]["attachments"][0]["filename"].endswith(".pdf")
+
+
+def test_email_payslip_requires_paid_cycle() -> None:
+    """A payslip from a non-PAID cycle is gated (403) for email too."""
+    with authed_client() as c:
+        _create_structure(c, employee_id=EMP1)
+        cid = _create_cycle(c)["id"]
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")  # -> PROCESSING
+    # Fetch the hidden payslip id directly from the DB.
+    conn = psycopg2.connect(_DSN)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM payslips WHERE cycle_id = %s;", (cid,))
+    slip_id = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    with authed_client() as c:
+        assert (
+            c.post(f"/api/v1/enterprise/payroll/payslips/{slip_id}/email").status_code
+            == status.HTTP_403_FORBIDDEN
+        )
+
+
+def test_viewer_cannot_email_payslip() -> None:
+    with authed_client(ADMIN) as admin:
+        slip = _paid_payslip(admin)
+    with authed_client(VIEWER) as viewer:
+        r = viewer.post(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/email")
+        assert r.status_code == status.HTTP_403_FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# Statutory compliance — Phase 1 (PF / ESI / PT)
+# ---------------------------------------------------------------------------
+def test_statutory_off_by_default_unchanged() -> None:
+    """With statutory toggles off, the calculation is identical to before."""
+    res = compute_payslip(_make_struct(), Decimal("0"), Decimal("30"))
+    assert res["gross_earnings"] == Decimal("71000.00")
+    assert res["total_deductions"] == Decimal("1800.00")  # only the manual PF line
+    assert res["employer_contributions"] == []
+
+
+def test_statutory_pf_capped_at_ceiling() -> None:
+    """PF (employee) = 12% of min(basic, 15000); employer splits into EPS+EPF."""
+    struct = _make_struct(
+        components=[{"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 40000}],
+        default_deductions=[],
+        pf_enabled=True,
+        pf_cap_at_ceiling=True,
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    pf = next(d for d in res["deductions"] if d["code"] == "PF")
+    assert pf["amount"] == 1800.0  # 12% of 15000
+    eps = next(c for c in res["employer_contributions"] if c["code"] == "EPS_ER")
+    epf = next(c for c in res["employer_contributions"] if c["code"] == "PF_ER")
+    assert eps["amount"] == 1250.0  # 8.33% of 15000
+    assert epf["amount"] == 550.0   # 12% - 8.33%
+    assert res["statutory"]["pf"]["wage_considered"] == 15000.0
+
+
+def test_statutory_pf_uncapped() -> None:
+    struct = _make_struct(
+        components=[{"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 40000}],
+        default_deductions=[],
+        pf_enabled=True,
+        pf_cap_at_ceiling=False,
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    pf = next(d for d in res["deductions"] if d["code"] == "PF")
+    assert pf["amount"] == 4800.0  # 12% of 40000
+
+
+def test_statutory_esi_excluded_above_limit() -> None:
+    """ESI only applies when gross <= 21000; a high earner is not covered."""
+    struct = _make_struct(
+        components=[{"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 40000}],
+        default_deductions=[],
+        esi_enabled=True,
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    assert all(d["code"] != "ESI" for d in res["deductions"])
+    assert res["statutory"]["esi"]["covered"] is False
+
+
+def test_statutory_esi_applies_within_limit() -> None:
+    struct = _make_struct(
+        components=[{"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 20000}],
+        default_deductions=[],
+        esi_enabled=True,
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    esi = next(d for d in res["deductions"] if d["code"] == "ESI")
+    assert esi["amount"] == 150.0  # 0.75% of 20000
+    esi_er = next(c for c in res["employer_contributions"] if c["code"] == "ESI_ER")
+    assert esi_er["amount"] == 650.0  # 3.25% of 20000
+
+
+def test_statutory_pt_by_state() -> None:
+    struct = _make_struct(
+        components=[{"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 40000}],
+        default_deductions=[],
+        pt_enabled=True,
+    )
+    res_ka = compute_payslip(struct, Decimal("0"), Decimal("30"), pt_state="KA")
+    pt = next(d for d in res_ka["deductions"] if d["code"] == "PT")
+    assert pt["amount"] == 200.0
+    # Unknown/unset state -> no PT, with a note recorded.
+    res_none = compute_payslip(struct, Decimal("0"), Decimal("30"), pt_state=None)
+    assert all(d["code"] != "PT" for d in res_none["deductions"])
+    assert res_none["statutory"]["pt"]["amount"] == 0.0
+
+
+def test_statutory_run_persists_employer_and_totals() -> None:
+    """Enabling statutory on a structure flows through run -> payslip + totals."""
+    with authed_client() as c:
+        # Put EMP1 in Karnataka so PT applies.
+        c.put(f"/api/v1/enterprise/employees/{EMP1}", json={"state": "KA"})
+        _create_structure(
+            c,
+            employee_id=EMP1,
+            default_deductions=[],  # statutory replaces manual deduction lines
+            pf_enabled=True,
+            esi_enabled=True,
+            pt_enabled=True,
+        )
+        cid = _create_cycle(c)["id"]
+        assert c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run").status_code == status.HTTP_200_OK
+
+        got = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}").json()
+        # gross 56000 (BASIC 40000 + HRA 16000); ESI excluded (>21000);
+        # PF employee 1800 + PT 200 -> net 54000; employer PF 1800.
+        assert got["totals"]["gross"] == 56000.0
+        assert got["totals"]["net"] == 54000.0
+        assert got["totals"]["employer_cost"] == 1800.0
+        assert got["totals"]["total_cost"] == 57800.0
+
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+        slip = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()[0]
+        detail = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}").json()
+        ded_codes = {d["code"] for d in detail["deductions"]}
+        assert {"PF", "PT"}.issubset(ded_codes)
+        er_codes = {c["code"] for c in detail["employer_contributions"]}
+        assert {"PF_ER", "EPS_ER"}.issubset(er_codes)

@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,6 +55,14 @@ class SalaryStructureBase(BaseModel):
         default=Decimal("0"), ge=0, description="Loss-of-pay days (pro-rates earnings each run)"
     )
     is_active: bool = Field(default=True)
+    # ----- Statutory toggles (Phase 1) -----
+    pf_enabled: bool = Field(default=False, description="Compute EPF (PF) for this employee")
+    pf_cap_at_ceiling: bool = Field(default=True, description="Cap PF wage at the ₹15,000 ceiling")
+    pf_wage_codes: list[str] | None = Field(
+        default=None, description="Earning codes forming PF wage (defaults to [BASIC])"
+    )
+    esi_enabled: bool = Field(default=False, description="Compute ESI when within wage limit")
+    pt_enabled: bool = Field(default=False, description="Compute Professional Tax by employee state")
 
 
 class SalaryStructureCreate(SalaryStructureBase):
@@ -69,6 +78,11 @@ class SalaryStructureUpdate(BaseModel):
     default_deductions: list[MoneyLine] | None = None
     lop_days: Decimal | None = Field(default=None, ge=0)
     is_active: bool | None = None
+    pf_enabled: bool | None = None
+    pf_cap_at_ceiling: bool | None = None
+    pf_wage_codes: list[str] | None = None
+    esi_enabled: bool | None = None
+    pt_enabled: bool | None = None
 
 
 class SalaryStructureOut(SalaryStructureBase):
@@ -147,6 +161,8 @@ class PayslipOut(BaseModel):
 class PayslipDetailOut(PayslipOut):
     earnings: list[ResolvedLine]
     deductions: list[ResolvedLine]
+    employer_contributions: list[ResolvedLine] = Field(default_factory=list)
+    statutory: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -203,3 +219,22 @@ class DashboardSummary(BaseModel):
     current_cycle: DashboardCycle | None = None
     recent_cycles: list[DashboardCycle] = Field(default_factory=list)
     currency: str = "INR"
+
+
+# ---------------------------------------------------------------------------
+# Payslip email results
+# ---------------------------------------------------------------------------
+class EmailResult(BaseModel):
+    sent: bool
+    to: str
+
+
+class EmailFailure(BaseModel):
+    payslip_id: uuid.UUID
+    employee_id: uuid.UUID
+    reason: str
+
+
+class BulkEmailResult(BaseModel):
+    sent: int = 0
+    failed: list[EmailFailure] = Field(default_factory=list)

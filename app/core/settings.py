@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     # Comma-separated list of allowed browser origins. Defaults to local dev.
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # ----- Email (Resend) -----
+    # Set RESEND_API_KEY + RESEND_FROM_EMAIL in the env to enable payslip email.
+    # The from-email's domain must be verified in your Resend account.
+    resend_api_key: str = ""
+    resend_from_email: str = ""
+    resend_from_name: str = "Croar Payroll"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore"

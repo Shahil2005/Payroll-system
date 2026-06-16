@@ -1,7 +1,8 @@
 import uuid
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, String, UniqueConstraint, text
+from sqlalchemy import Date, ForeignKey, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,6 +39,16 @@ class Employee(Base, TimestampMixin):
     payment_information: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
+
+    # ----- Statutory identifiers / drivers (Phase 1) -----
+    # PAN/UAN/ESIC feed compliance filings; `state` drives Professional Tax;
+    # `date_of_joining` feeds eligibility/gratuity. All optional so existing
+    # employees are unaffected until HR fills them in.
+    pan: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    uan: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    esic_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    date_of_joining: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     salary_structures: Mapped[list["SalaryStructure"]] = relationship(
         back_populates="employee", cascade="all, delete-orphan"

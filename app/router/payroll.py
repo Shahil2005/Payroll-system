@@ -1,14 +1,19 @@
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 
-from app.constants import PayrollCycleStatus, Permission
+from app.constants import DEFAULT_WORKING_DAYS, PayrollCycleStatus, Permission
 from app.core.dependencies import DBSessionDep, get_current_company_id, require_permission
+from app.models.company import Company
+from app.models.employee import Employee
 from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
 from app.schema.payroll import (
+    BulkEmailResult,
     DashboardSummary,
+    EmailResult,
     PayrollCycleCreate,
     PayrollCycleOut,
     PayslipDetailOut,
@@ -18,7 +23,7 @@ from app.schema.payroll import (
     SalaryStructureOut,
     SalaryStructureUpdate,
 )
-from app.services import payroll_service
+from app.services import email_service, payroll_service, pdf_service
 
 router = APIRouter(prefix="/api/v1/enterprise/payroll", tags=["payroll"])
 
@@ -76,6 +81,11 @@ async def create_salary_structure(
         default_deductions=[d.model_dump(mode="json") for d in payload.default_deductions],
         lop_days=payload.lop_days,
         is_active=payload.is_active,
+        pf_enabled=payload.pf_enabled,
+        pf_cap_at_ceiling=payload.pf_cap_at_ceiling,
+        pf_wage_codes=payload.pf_wage_codes,
+        esi_enabled=payload.esi_enabled,
+        pt_enabled=payload.pt_enabled,
     )
     db.add(struct)
     try:
@@ -382,3 +392,209 @@ async def get_payslip(
             detail="This payslip is not available until the payroll cycle is marked as paid.",
         )
     return payslip
+
+
+# ---------------------------------------------------------------------------
+# Payslip PDF + email
+# ---------------------------------------------------------------------------
+async def _gather_payslip(
+    db: DBSessionDep, payslip_id: uuid.UUID, company_id: uuid.UUID
+) -> tuple[Payslip, PayrollCycle, Employee | None, Company | None]:
+    """Load a payslip + its cycle/employee/company, enforcing the PAID gate.
+
+    Mirrors ``get_payslip``: a payslip is only retrievable (and thus printable
+    or emailable) once its cycle has been marked PAID.
+    """
+    payslip = (
+        await db.execute(
+            select(Payslip).where(Payslip.id == payslip_id, Payslip.company_id == company_id)
+        )
+    ).scalar_one_or_none()
+    if not payslip:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payslip not found")
+    cycle = await payroll_service._load_cycle(db, payslip.cycle_id, company_id)
+    if cycle.status != PayrollCycleStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This payslip is not available until the payroll cycle is marked as paid.",
+        )
+    employee = (
+        await db.execute(select(Employee).where(Employee.id == payslip.employee_id))
+    ).scalar_one_or_none()
+    company = (
+        await db.execute(select(Company).where(Company.id == company_id))
+    ).scalar_one_or_none()
+    return payslip, cycle, employee, company
+
+
+def _render_pdf(
+    payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
+) -> bytes:
+    emp_name = (
+        f"{employee.first_name} {employee.last_name}".strip()
+        if employee
+        else str(payslip.employee_id)
+    )
+    return pdf_service.render_payslip_pdf(
+        company_name=company.name if company else "Company",
+        employee_name=emp_name,
+        employee_email=employee.email if employee else "",
+        ref=str(payslip.id)[:8],
+        period_start=cycle.period_start,
+        period_end=cycle.period_end,
+        pay_date=cycle.pay_date,
+        status=payslip.status,
+        earnings=payslip.earnings or [],
+        deductions=payslip.deductions or [],
+        gross=payslip.gross_earnings,
+        total_deductions=payslip.total_deductions,
+        net=payslip.net_pay,
+        lop_days=payslip.lop_days,
+        paid_days=payslip.paid_days,
+        working_days=DEFAULT_WORKING_DAYS,
+        currency=payslip.currency,
+        employer_contributions=payslip.employer_contributions or [],
+    )
+
+
+def _pdf_filename(cycle: PayrollCycle, employee: Employee | None, payslip: Payslip) -> str:
+    who = (
+        f"{employee.first_name}-{employee.last_name}".strip("-")
+        if employee
+        else str(payslip.employee_id)[:8]
+    )
+    safe_who = "".join(c if c.isalnum() or c in "-_" else "-" for c in who) or "employee"
+    safe_cycle = "".join(c if c.isalnum() or c in "-_" else "-" for c in cycle.name) or "cycle"
+    return f"payslip-{safe_who}-{safe_cycle}.pdf"
+
+
+@router.get("/payslips/{id}/pdf")
+async def download_payslip_pdf(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> Response:
+    """Download the payslip as a server-rendered PDF (same artifact emailed)."""
+    payslip, cycle, employee, company = await _gather_payslip(db, id, company_id)
+    pdf = await run_in_threadpool(_render_pdf, payslip, cycle, employee, company)
+    filename = _pdf_filename(cycle, employee, payslip)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/payslips/{id}/email", response_model=EmailResult)
+async def email_payslip(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_PAY)),
+) -> EmailResult:
+    """Email the payslip (with PDF attached) to the employee's address."""
+    payslip, cycle, employee, company = await _gather_payslip(db, id, company_id)
+    if not employee or not employee.email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="This employee has no email address on file.",
+        )
+    pdf = await run_in_threadpool(_render_pdf, payslip, cycle, employee, company)
+    company_name = company.name if company else "Croar Payroll"
+    html = email_service.payslip_email_html(
+        employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+        company_name=company_name,
+        period=f"{cycle.period_start} to {cycle.period_end}",
+        net_pay=f"{payslip.currency} {float(payslip.net_pay):,.2f}",
+    )
+    try:
+        await run_in_threadpool(
+            email_service.send_payslip_email,
+            to_email=employee.email,
+            subject=f"Your payslip — {cycle.name}",
+            html=html,
+            pdf_bytes=pdf,
+            filename=_pdf_filename(cycle, employee, payslip),
+        )
+    except email_service.EmailNotConfiguredError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except Exception as exc:  # surface any SDK/network failure as 502
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to send email: {exc}",
+        ) from exc
+    return EmailResult(sent=True, to=employee.email)
+
+
+@router.post("/cycles/{id}/email-payslips", response_model=BulkEmailResult)
+async def email_cycle_payslips(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_PAY)),
+) -> BulkEmailResult:
+    """Email every payslip in a PAID cycle to its employee.
+
+    Best-effort: each payslip is attempted independently; failures (no email,
+    send error) are collected and returned rather than aborting the batch.
+    """
+    cycle = await payroll_service._load_cycle(db, id, company_id)
+    if cycle.status != PayrollCycleStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Payslips can only be emailed once the cycle is marked as paid.",
+        )
+    if not email_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL.",
+        )
+
+    payslips = (
+        await db.execute(
+            select(Payslip).where(Payslip.cycle_id == id, Payslip.company_id == company_id)
+        )
+    ).scalars().all()
+    company = (
+        await db.execute(select(Company).where(Company.id == company_id))
+    ).scalar_one_or_none()
+    company_name = company.name if company else "Croar Payroll"
+
+    sent = 0
+    failed: list[dict[str, object]] = []
+    for slip in payslips:
+        employee = (
+            await db.execute(select(Employee).where(Employee.id == slip.employee_id))
+        ).scalar_one_or_none()
+        if not employee or not employee.email:
+            failed.append(
+                {
+                    "payslip_id": slip.id,
+                    "employee_id": slip.employee_id,
+                    "reason": "no email address on file",
+                }
+            )
+            continue
+        pdf = await run_in_threadpool(_render_pdf, slip, cycle, employee, company)
+        html = email_service.payslip_email_html(
+            employee_name=f"{employee.first_name} {employee.last_name}".strip(),
+            company_name=company_name,
+            period=f"{cycle.period_start} to {cycle.period_end}",
+            net_pay=f"{slip.currency} {float(slip.net_pay):,.2f}",
+        )
+        try:
+            await run_in_threadpool(
+                email_service.send_payslip_email,
+                to_email=employee.email,
+                subject=f"Your payslip — {cycle.name}",
+                html=html,
+                pdf_bytes=pdf,
+                filename=_pdf_filename(cycle, employee, slip),
+            )
+            sent += 1
+        except Exception as exc:  # collect per-payslip failures
+            failed.append(
+                {"payslip_id": slip.id, "employee_id": slip.employee_id, "reason": str(exc)}
+            )
+    return BulkEmailResult.model_validate({"sent": sent, "failed": failed})
