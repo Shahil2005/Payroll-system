@@ -100,9 +100,9 @@ const DEFAULT_WD = 30;
 
 function Info({ label, value, center = false }: { label: string; value: string; center?: boolean }) {
   return (
-    <div className={center ? "text-center" : ""}>
+    <div className={`min-w-0 ${center ? "text-center" : ""}`}>
       <div className="text-[0.7rem] uppercase tracking-wide text-[var(--color-muted)]">{label}</div>
-      <div className="font-medium">{value}</div>
+      <div className="font-medium wrap-anywhere">{value}</div>
     </div>
   );
 }
