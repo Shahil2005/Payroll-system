@@ -1,0 +1,53 @@
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ----- Caches & type checkers -----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ----- Test / coverage reports -----
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ----- Environment & secrets -----
+# .env holds real credentials; .env.sample and .env.test are committed templates
+.env
+ssl/
+*.pem
+
+# ----- Runtime data -----
+data/db/
+data/logs/
+*.log
+
+# ----- Alembic (auto-generated during dev) -----
+alembic/versions/*
+
+# ----- Editor / OS -----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ----- Misc -----
+*.zip
+.history
