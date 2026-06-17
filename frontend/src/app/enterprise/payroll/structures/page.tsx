@@ -7,7 +7,9 @@ import {
   inr,
   type Employee,
   type MoneyLine,
+  type ResolvedLine,
   type SalaryStructure,
+  type StructurePreviewOut,
 } from "@/utils/api";
 import { Banner, Modal } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
@@ -105,16 +107,65 @@ export default function StructuresPage() {
     load();
   }, []);
 
+  const empOf = (eid: string) => employees.find((x) => x.id === eid);
   const empName = (eid: string) => {
-    const e = employees.find((x) => x.id === eid);
+    const e = empOf(eid);
     return e ? `${e.first_name} ${e.last_name}`.trim() : `Employee ${eid.slice(0, 8)}`;
   };
 
+  // Instant local estimate (manual lines only) — shown immediately while the
+  // authoritative server preview (which also includes statutory + TDS) loads.
   const estimate = useMemo(
     () => estimateSalary(toMoneyLines(earnings), toMoneyLines(deductions), Number(lopDays) || 0),
     [earnings, deductions, lopDays]
   );
   const earningCodes = earnings.map((e) => e.code).filter(Boolean);
+
+  // Authoritative live preview from the backend — same engine a payroll run
+  // uses, so PF/ESI/PT/TDS deductions update in real time as toggles change.
+  const [preview, setPreview] = useState<StructurePreviewOut | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setPreviewing(true);
+    const handle = setTimeout(() => {
+      payrollApi
+        .previewStructure({
+          employee_id: employeeId || null,
+          components: toMoneyLines(earnings),
+          default_deductions: toMoneyLines(deductions),
+          lop_days: Number(lopDays) || 0,
+          pf_enabled: pfEnabled,
+          pf_cap_at_ceiling: pfCap,
+          esi_enabled: esiEnabled,
+          pt_enabled: ptEnabled,
+          tds_enabled: tdsEnabled,
+        })
+        .then((res) => {
+          if (!cancelled) setPreview(res);
+        })
+        .catch(() => {
+          if (!cancelled) setPreview(null);
+        })
+        .finally(() => {
+          if (!cancelled) setPreviewing(false);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [open, employeeId, earnings, deductions, lopDays, pfEnabled, pfCap, esiEnabled, ptEnabled, tdsEnabled]);
+
+  // Prefer the server figures once available; fall back to the local estimate.
+  const gross = preview ? Number(preview.gross_earnings) : estimate.gross;
+  const totalDeductions = preview ? Number(preview.total_deductions) : estimate.totalDeductions;
+  const net = preview ? Number(preview.net_pay) : estimate.net;
+  const deductionLines: ResolvedLine[] = preview
+    ? (preview.deductions ?? [])
+    : estimate.deductions;
 
   function openCreate() {
     setEditingId(null);
@@ -213,15 +264,20 @@ export default function StructuresPage() {
 
   return (
     <div className="animate-fade-in flex flex-col gap-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Salary Structures</h1>
-          <p className="text-sm text-[var(--color-muted)]">
-            Define each employee&apos;s earnings and recurring deductions.
-          </p>
+      <header className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[var(--color-primary)]/10 text-[var(--color-primary)]">
+            <span className="material-symbols-outlined">tune</span>
+          </span>
+          <div>
+            <h1 className="text-3xl font-bold">Salary Structures</h1>
+            <p className="text-sm text-[var(--color-muted)]">
+              Define each employee&apos;s earnings, deductions &amp; statutory setup.
+            </p>
+          </div>
         </div>
         {canEdit && (
-          <button onClick={openCreate} className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]">
+          <button onClick={openCreate} className="flex shrink-0 items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]">
             <span className="material-symbols-outlined text-[20px]">add</span>
             Add Structure
           </button>
@@ -230,47 +286,111 @@ export default function StructuresPage() {
 
       {error && <Banner>{error}</Banner>}
 
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)]">
+      {/* Summary strip */}
+      {!loading && structures.length > 0 && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <SummaryCard icon="groups" label="Structures" value={String(structures.length)} />
+          <SummaryCard
+            icon="savings"
+            label="EPF enabled"
+            value={String(structures.filter((s) => s.pf_enabled).length)}
+          />
+          <SummaryCard
+            icon="health_and_safety"
+            label="ESI enabled"
+            value={String(structures.filter((s) => s.esi_enabled).length)}
+          />
+          <SummaryCard
+            icon="account_balance"
+            label="TDS enabled"
+            value={String(structures.filter((s) => s.tds_enabled).length)}
+          />
+        </div>
+      )}
+
+      <section className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)]">
         {loading ? (
           <p className="p-8 text-center text-[var(--color-muted)]">Loading…</p>
         ) : structures.length === 0 ? (
           <div className="flex flex-col items-center gap-3 p-12 text-center">
-            <span className="material-symbols-outlined text-4xl text-[var(--color-dim)]">tune</span>
-            <p className="text-[var(--color-muted)]">No salary structures yet.</p>
+            <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[var(--color-hover)] text-[var(--color-dim)]">
+              <span className="material-symbols-outlined text-3xl">tune</span>
+            </span>
+            <p className="font-medium">No salary structures yet</p>
+            <p className="max-w-sm text-sm text-[var(--color-muted)]">
+              Create a structure to define an employee&apos;s earnings and statutory deductions.
+            </p>
+            {canEdit && (
+              <button onClick={openCreate} className="mt-1 flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]">
+                <span className="material-symbols-outlined text-[20px]">add</span>
+                Add your first structure
+              </button>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
-              <thead className="text-xs uppercase text-[var(--color-muted)]">
-                <tr className="border-b border-[var(--color-border)]">
-                  <th className="px-6 py-3">Employee</th>
-                  <th className="px-6 py-3 text-right">CTC (annual)</th>
-                  <th className="px-6 py-3">Frequency</th>
-                  <th className="px-6 py-3">Effective</th>
-                  {canEdit && <th className="px-6 py-3 text-right">Actions</th>}
+              <thead className="text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                <tr className="border-b border-[var(--color-border)] bg-[var(--color-bg)]/40">
+                  <th className="px-6 py-3 font-semibold">Employee</th>
+                  <th className="px-6 py-3 text-right font-semibold">CTC (annual)</th>
+                  <th className="px-6 py-3 font-semibold">Statutory</th>
+                  <th className="px-6 py-3 font-semibold">Effective</th>
+                  {canEdit && <th className="px-6 py-3 text-right font-semibold">Actions</th>}
                 </tr>
               </thead>
               <tbody>
-                {structures.map((s) => (
-                  <tr key={s.id} className="border-b border-[var(--color-border)] last:border-0">
-                    <td className="px-6 py-4 font-medium">{empName(s.employee_id)}</td>
-                    <td className="px-6 py-4 text-right">{inr(s.ctc, s.currency)}</td>
-                    <td className="px-6 py-4">{s.pay_frequency}</td>
-                    <td className="px-6 py-4 text-[var(--color-muted)]">{s.effective_from}</td>
-                    {canEdit && (
+                {structures.map((s) => {
+                  const e = empOf(s.employee_id);
+                  const initials = e
+                    ? `${e.first_name?.[0] ?? ""}${e.last_name?.[0] ?? ""}`.toUpperCase()
+                    : "—";
+                  return (
+                    <tr key={s.id} className="border-b border-[var(--color-border)] transition-colors last:border-0 hover:bg-[var(--color-hover)]/30">
                       <td className="px-6 py-4">
-                        <div className="flex items-center justify-end gap-2">
-                          <button onClick={() => openEdit(s)} className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs hover:bg-[var(--color-hover)]">
-                            Edit
-                          </button>
-                          <button onClick={() => remove(s.id)} className="rounded-md px-2.5 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10">
-                            Delete
-                          </button>
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--color-primary)]/15 text-xs font-bold text-[var(--color-primary)]">
+                            {initials}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-medium">{empName(s.employee_id)}</div>
+                            {e?.email && (
+                              <div className="truncate text-xs text-[var(--color-muted)]">{e.email}</div>
+                            )}
+                          </div>
                         </div>
                       </td>
-                    )}
-                  </tr>
-                ))}
+                      <td className="px-6 py-4 text-right">
+                        <div className="font-semibold">{inr(s.ctc, s.currency)}</div>
+                        <div className="text-xs text-[var(--color-muted)]">{s.pay_frequency.toLowerCase()}</div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-wrap gap-1.5">
+                          {s.pf_enabled && <StatChip>EPF</StatChip>}
+                          {s.esi_enabled && <StatChip>ESI</StatChip>}
+                          {s.pt_enabled && <StatChip>PT</StatChip>}
+                          {s.tds_enabled && <StatChip>TDS</StatChip>}
+                          {!s.pf_enabled && !s.esi_enabled && !s.pt_enabled && !s.tds_enabled && (
+                            <span className="text-xs text-[var(--color-dim)]">None</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-[var(--color-muted)]">{s.effective_from}</td>
+                      {canEdit && (
+                        <td className="px-6 py-4">
+                          <div className="flex items-center justify-end gap-2">
+                            <button onClick={() => openEdit(s)} className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs hover:bg-[var(--color-hover)]">
+                              Edit
+                            </button>
+                            <button onClick={() => remove(s.id)} className="rounded-md px-2.5 py-1 text-xs text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10">
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -278,142 +398,197 @@ export default function StructuresPage() {
       </section>
 
       {open && (
-        <Modal title={editingId ? "Edit Salary Structure" : "New Salary Structure"} onClose={() => setOpen(false)}>
-          <form onSubmit={save} className="flex flex-col gap-5">
+        <Modal
+          title={editingId ? "Edit Salary Structure" : "New Salary Structure"}
+          onClose={() => setOpen(false)}
+          width="max-w-6xl"
+        >
+          <form onSubmit={save} className="flex flex-col gap-6">
             {formErr && <Banner>{formErr}</Banner>}
 
-            <div className="grid grid-cols-2 gap-4">
-              <label className="flex flex-col gap-1.5">
-                <span className="lbl">Employee</span>
-                <select
-                  className="input"
-                  value={employeeId}
-                  disabled={!!editingId}
-                  onChange={(e) => setEmployeeId(e.target.value)}
-                >
-                  {employees.length === 0 && <option value="">No employees — add one first</option>}
-                  {employees.map((e) => (
-                    <option key={e.id} value={e.id}>
-                      {e.first_name} {e.last_name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="lbl">Annual CTC</span>
-                <input type="number" className="input" value={ctc} onChange={(e) => setCtc(e.target.value)} required />
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="lbl">Currency</span>
-                <input className="input" value={currency} onChange={(e) => setCurrency(e.target.value)} />
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="lbl">Pay Frequency</span>
-                <select className="input" value={payFrequency} onChange={(e) => setPayFrequency(e.target.value as "MONTHLY" | "WEEKLY")}>
-                  <option value="MONTHLY">MONTHLY</option>
-                  <option value="WEEKLY">WEEKLY</option>
-                </select>
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="lbl">Effective From</span>
-                <input type="date" className="input" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} required />
-              </label>
-            </div>
-
-            <LineSection
-              title="Earnings"
-              rows={earnings}
-              setRows={setEarnings}
-              earningCodes={earningCodes}
-            />
-            <LineSection
-              title="Deductions"
-              rows={deductions}
-              setRows={setDeductions}
-              earningCodes={earningCodes}
-              footer={
-                <label className="flex flex-col gap-1.5 border-t border-[var(--color-border)] pt-3">
-                  <span className="lbl">Loss of Pay (LOP days)</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.5"
-                    className="input w-40"
-                    value={lopDays}
-                    onChange={(e) => setLopDays(e.target.value)}
-                  />
-                  <span className="text-xs text-[var(--color-muted)]">
-                    Unpaid days for this employee. Earnings are pro-rated over {/* working-days basis */}
-                    30 days when payroll runs.
-                  </span>
-                </label>
-              }
-            />
-
-            {/* Statutory compliance (Phase 1: PF / ESI / PT) */}
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <span className="font-semibold">Statutory Compliance</span>
-                <span className="text-xs text-[var(--color-muted)]">computed automatically when enabled</span>
-              </div>
-              <div className="flex flex-col gap-3">
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={pfEnabled} onChange={(e) => setPfEnabled(e.target.checked)} />
-                  <span>Provident Fund (EPF) — 12% employee + employer</span>
-                </label>
-                {pfEnabled && (
-                  <label className="ml-6 flex items-center gap-2 text-sm text-[var(--color-muted)]">
-                    <input type="checkbox" checked={pfCap} onChange={(e) => setPfCap(e.target.checked)} />
-                    <span>Cap PF wage at the ₹15,000 statutory ceiling</span>
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+              {/* Left column — the editable structure */}
+              <div className="flex min-w-0 flex-col gap-5">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <label className="flex flex-col gap-1.5">
+                    <span className="lbl">Employee</span>
+                    <select
+                      className="input"
+                      value={employeeId}
+                      disabled={!!editingId}
+                      onChange={(e) => setEmployeeId(e.target.value)}
+                    >
+                      {employees.length === 0 && <option value="">No employees — add one first</option>}
+                      {employees.map((e) => (
+                        <option key={e.id} value={e.id}>
+                          {e.first_name} {e.last_name}
+                        </option>
+                      ))}
+                    </select>
                   </label>
-                )}
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={esiEnabled} onChange={(e) => setEsiEnabled(e.target.checked)} />
-                  <span>ESI — 0.75% employee + 3.25% employer (only if gross ≤ ₹21,000)</span>
-                </label>
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={ptEnabled} onChange={(e) => setPtEnabled(e.target.checked)} />
-                  <span>Professional Tax — by the employee&apos;s state</span>
-                </label>
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={tdsEnabled} onChange={(e) => setTdsEnabled(e.target.checked)} />
-                  <span>Income Tax (TDS) — estimated from the employee&apos;s IT declaration</span>
-                </label>
-                {tdsEnabled && (
-                  <p className="ml-6 text-xs text-[var(--color-muted)]">
-                    Set the employee&apos;s regime &amp; declarations under Taxes &amp; Forms. TDS is an
-                    estimate, not filing-grade.
-                  </p>
-                )}
-              </div>
-              <p className="mt-3 text-xs text-[var(--color-muted)]">
-                Statutory amounts are calculated at run time and shown as locked lines on the payslip —
-                don&apos;t also add them as manual deduction lines above. The live estimate below excludes
-                statutory; the payslip shows the exact figures.
-              </p>
-            </div>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="lbl">Annual CTC</span>
+                    <input type="number" className="input" value={ctc} onChange={(e) => setCtc(e.target.value)} required />
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="lbl">Currency</span>
+                    <input className="input" value={currency} onChange={(e) => setCurrency(e.target.value)} />
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="lbl">Pay Frequency</span>
+                    <select className="input" value={payFrequency} onChange={(e) => setPayFrequency(e.target.value as "MONTHLY" | "WEEKLY")}>
+                      <option value="MONTHLY">MONTHLY</option>
+                      <option value="WEEKLY">WEEKLY</option>
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="lbl">Effective From</span>
+                    <input type="date" className="input" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} required />
+                  </label>
+                </div>
 
-            {/* Live estimate */}
-            <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="font-semibold">Estimated Monthly Salary</span>
+                <LineSection
+                  title="Earnings"
+                  rows={earnings}
+                  setRows={setEarnings}
+                  earningCodes={earningCodes}
+                />
+                <LineSection
+                  title="Deductions"
+                  rows={deductions}
+                  setRows={setDeductions}
+                  earningCodes={earningCodes}
+                  footer={
+                    <label className="flex flex-col gap-1.5 border-t border-[var(--color-border)] pt-3">
+                      <span className="lbl">Loss of Pay (LOP days)</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        className="input w-40"
+                        value={lopDays}
+                        onChange={(e) => setLopDays(e.target.value)}
+                      />
+                      <span className="text-xs text-[var(--color-muted)]">
+                        Unpaid days for this employee. Earnings are pro-rated over {/* working-days basis */}
+                        30 days when payroll runs.
+                      </span>
+                    </label>
+                  }
+                />
+
+                {/* Statutory compliance (Phase 1: PF / ESI / PT / TDS) */}
+                <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[20px] text-[var(--color-primary)]">verified_user</span>
+                <span className="font-semibold">Statutory Compliance</span>
+                <span className="ml-auto text-xs text-[var(--color-muted)]">auto-computed when on</span>
+              </div>
+              <div className="flex flex-col gap-2">
+                <ToggleRow
+                  icon="savings"
+                  title="Provident Fund (EPF)"
+                  desc="12% employee + employer contribution."
+                  checked={pfEnabled}
+                  onChange={setPfEnabled}
+                >
+                  {pfEnabled && (
+                    <label className="mt-2 flex items-center gap-2 text-xs text-[var(--color-muted)]">
+                      <input type="checkbox" checked={pfCap} onChange={(e) => setPfCap(e.target.checked)} />
+                      <span>Cap PF wage at the ₹15,000 statutory ceiling</span>
+                    </label>
+                  )}
+                </ToggleRow>
+                <ToggleRow
+                  icon="health_and_safety"
+                  title="ESI"
+                  desc="0.75% employee + 3.25% employer (gross ≤ ₹21,000)."
+                  checked={esiEnabled}
+                  onChange={setEsiEnabled}
+                />
+                <ToggleRow
+                  icon="account_balance_wallet"
+                  title="Professional Tax"
+                  desc="Computed by the employee's state slab."
+                  checked={ptEnabled}
+                  onChange={setPtEnabled}
+                />
+                <ToggleRow
+                  icon="account_balance"
+                  title="Income Tax (TDS)"
+                  desc="Estimated from the employee's IT declaration."
+                  checked={tdsEnabled}
+                  onChange={setTdsEnabled}
+                >
+                  {tdsEnabled && (
+                    <p className="mt-2 text-xs text-[var(--color-muted)]">
+                      Set the employee&apos;s regime &amp; declarations under Taxes &amp; Forms. TDS is an
+                      estimate, not filing-grade.
+                    </p>
+                  )}
+                </ToggleRow>
+              </div>
+                  <p className="mt-3 text-xs text-[var(--color-muted)]">
+                    Statutory amounts are calculated automatically and shown as locked lines on the
+                    payslip — don&apos;t also add them as manual deduction lines above. The live
+                    estimate alongside already includes them.
+                  </p>
+                </div>
+              </div>
+
+              {/* Right column — live estimate (server-computed; sticky) */}
+              <div className="lg:sticky lg:top-0 lg:self-start">
+                <div className="overflow-hidden rounded-xl border border-[var(--color-primary)]/30 bg-gradient-to-br from-[var(--color-primary)]/10 to-[var(--color-bg)]">
+              <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2.5">
+                <span className="flex items-center gap-2 text-sm font-semibold">
+                  <span className="material-symbols-outlined text-[18px] text-[var(--color-primary)]">calculate</span>
+                  Estimated Monthly Salary
+                  {previewing && (
+                    <span className="text-xs font-normal text-[var(--color-muted)]">updating…</span>
+                  )}
+                </span>
                 <span className="text-xs text-[var(--color-muted)]">
                   {Number(lopDays) > 0 ? `after ${Number(lopDays)} LOP day(s) · 30-day basis` : "full month · no LOP"}
                 </span>
               </div>
-              <div className="grid grid-cols-3 gap-4">
-                <Stat label="Gross" value={inr(estimate.gross, currency)} />
-                <Stat label="Deductions" value={`- ${inr(estimate.totalDeductions, currency)}`} tone="text-[var(--color-danger)]" />
-                <Stat label="Net" value={inr(estimate.net, currency)} tone="text-[var(--color-accent)]" big />
+              <div className="grid grid-cols-3 gap-4 p-4">
+                <Stat label="Gross" value={inr(gross, currency)} />
+                <Stat label="Deductions" value={`- ${inr(totalDeductions, currency)}`} tone="text-[var(--color-danger)]" />
+                <Stat label="Net Pay" value={inr(net, currency)} tone="text-[var(--color-accent)]" big />
+              </div>
+              {deductionLines.length > 0 && (
+                <div className="border-t border-[var(--color-border)] px-4 py-3">
+                  <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                    Deduction breakdown
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {deductionLines.map((l) => (
+                      <div key={l.code} className="flex justify-between text-sm">
+                        <span className="text-[var(--color-muted)]">{l.label}</span>
+                        <span className="font-medium text-[var(--color-danger)]">
+                          - {inr(l.amount, currency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+                  {!preview && !previewing && (
+                    <p className="px-4 pb-3 text-xs text-[var(--color-muted)]">
+                      Showing a local estimate (manual lines only) — statutory figures appear once
+                      the live preview loads.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
 
-            <div className="flex gap-3">
-              <button type="submit" disabled={saving} className="btn-primary">
-                {saving ? "Saving…" : editingId ? "Update Structure" : "Save Structure"}
-              </button>
-              <button type="button" onClick={() => setOpen(false)} className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] py-2.5 text-sm font-semibold">
+            <div className="flex justify-end gap-3 border-t border-[var(--color-border)] pt-4">
+              <button type="button" onClick={() => setOpen(false)} className="btn-ghost px-8">
                 Cancel
+              </button>
+              <button type="submit" disabled={saving} style={{ width: "auto" }} className="btn-primary px-8">
+                {saving ? "Saving…" : editingId ? "Update Structure" : "Save Structure"}
               </button>
             </div>
           </form>
@@ -428,6 +603,92 @@ function Stat({ label, value, tone = "text-[var(--color-text)]", big = false }: 
     <div>
       <div className="text-xs text-[var(--color-muted)]">{label}</div>
       <div className={`font-bold ${tone} ${big ? "text-xl" : "text-base"}`}>{value}</div>
+    </div>
+  );
+}
+
+function SummaryCard({ icon, label, value }: { icon: string; label: string; value: string }) {
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] px-4 py-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)]/10 text-[var(--color-primary)]">
+        <span className="material-symbols-outlined text-[20px]">{icon}</span>
+      </span>
+      <div>
+        <div className="text-lg font-bold leading-none">{value}</div>
+        <div className="text-xs text-[var(--color-muted)]">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function StatChip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center rounded-md bg-[var(--color-primary)]/15 px-2 py-0.5 text-xs font-semibold text-[var(--color-primary)]">
+      {children}
+    </span>
+  );
+}
+
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+        checked ? "bg-[var(--color-primary)]" : "bg-[var(--color-hover)]"
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+          checked ? "translate-x-[18px]" : "translate-x-0.5"
+        }`}
+      />
+    </button>
+  );
+}
+
+function ToggleRow({
+  icon,
+  title,
+  desc,
+  checked,
+  onChange,
+  children,
+}: {
+  icon: string;
+  title: string;
+  desc: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-3 transition-colors ${
+        checked
+          ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/5"
+          : "border-[var(--color-border)] bg-[var(--color-card)]"
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        <span
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+            checked
+              ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+              : "bg-[var(--color-hover)] text-[var(--color-muted)]"
+          }`}
+        >
+          <span className="material-symbols-outlined text-[18px]">{icon}</span>
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold">{title}</div>
+          <div className="text-xs text-[var(--color-muted)]">{desc}</div>
+        </div>
+        <Toggle checked={checked} onChange={onChange} />
+      </div>
+      {children && <div className="pl-11">{children}</div>}
     </div>
   );
 }

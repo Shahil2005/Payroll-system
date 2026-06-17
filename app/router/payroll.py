@@ -24,6 +24,8 @@ from app.schema.payroll import (
     SalaryStructureCreate,
     SalaryStructureOut,
     SalaryStructureUpdate,
+    StructurePreviewIn,
+    StructurePreviewOut,
 )
 from app.services import email_service, payroll_service, pdf_service
 
@@ -98,6 +100,34 @@ async def create_salary_structure(
         await db.rollback()
         raise
     return struct
+
+
+@router.post("/structures/preview", response_model=StructurePreviewOut)
+async def preview_salary_structure(
+    payload: StructurePreviewIn,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> dict:
+    """Live, non-persisted payslip calculation for the structure form.
+
+    Returns the exact figures a payroll run would produce — including statutory
+    (PF/ESI/PT) and TDS — so the form's estimate reflects real deductions, not
+    just the manual lines.
+    """
+    draft = {
+        "employee_id": payload.employee_id,
+        "components": [c.model_dump(mode="json") for c in payload.components],
+        "default_deductions": [d.model_dump(mode="json") for d in payload.default_deductions],
+        "lop_days": payload.lop_days,
+        "pf_enabled": payload.pf_enabled,
+        "pf_cap_at_ceiling": payload.pf_cap_at_ceiling,
+        "pf_wage_codes": payload.pf_wage_codes,
+        "esi_enabled": payload.esi_enabled,
+        "pt_enabled": payload.pt_enabled,
+        "tds_enabled": payload.tds_enabled,
+    }
+    return await payroll_service.preview_structure(db, company_id, draft)
 
 
 @router.get("/structures", response_model=list[SalaryStructureOut])

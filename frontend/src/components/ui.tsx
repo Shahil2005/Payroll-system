@@ -37,10 +37,13 @@ export function Modal({
   title,
   onClose,
   children,
+  width = "max-w-2xl",
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
+  /** Tailwind max-width class controlling the dialog width. */
+  width?: string;
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -55,7 +58,7 @@ export function Modal({
       onClick={onClose}
     >
       <div
-        className="max-h-[calc(100vh-3rem)] w-full max-w-2xl overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-7 shadow-2xl"
+        className={`max-h-[calc(100vh-3rem)] w-full ${width} overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-7 shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between">

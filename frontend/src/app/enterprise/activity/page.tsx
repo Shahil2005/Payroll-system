@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { auditApi, type AuditEntry } from "@/utils/api";
 import { Banner } from "@/components/ui";
+
+const PAGE_SIZE = 10;
 
 function statusTone(code: number): string {
   if (code < 300) return "bg-[var(--color-accent)]/15 text-[var(--color-accent)]";
@@ -23,6 +25,7 @@ export default function ActivityPage() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     auditApi
@@ -31,6 +34,16 @@ export default function ActivityPage() {
       .catch((err) => setError((err as Error).message))
       .finally(() => setLoading(false));
   }, []);
+
+  const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
+  // Clamp the page if the data shrinks (e.g. after a refetch).
+  const currentPage = Math.min(page, totalPages);
+  const pageEntries = useMemo(
+    () => entries.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [entries, currentPage]
+  );
+  const rangeStart = entries.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const rangeEnd = Math.min(currentPage * PAGE_SIZE, entries.length);
 
   return (
     <div className="animate-fade-in flex flex-col gap-6">
@@ -51,37 +64,69 @@ export default function ActivityPage() {
           <p className="text-[var(--color-muted)]">No activity recorded yet.</p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)]">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
-                <th className="px-5 py-3 font-semibold">When</th>
-                <th className="px-5 py-3 font-semibold">Who</th>
-                <th className="px-5 py-3 font-semibold">Action</th>
-                <th className="px-5 py-3 font-semibold">Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => (
-                <tr key={e.id} className="border-b border-[var(--color-border)] last:border-0">
-                  <td className="whitespace-nowrap px-5 py-3 text-[var(--color-muted)]">
-                    {when(e.created_at)}
-                  </td>
-                  <td className="px-5 py-3">{e.actor_email ?? "—"}</td>
-                  <td className="px-5 py-3 font-medium">{e.action}</td>
-                  <td className="px-5 py-3">
-                    <span
-                      className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${statusTone(
-                        e.status_code
-                      )}`}
-                    >
-                      {e.status_code}
-                    </span>
-                  </td>
+        <div className="flex flex-col gap-4">
+          <div className="overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)]">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                  <th className="px-5 py-3 font-semibold">When</th>
+                  <th className="px-5 py-3 font-semibold">Who</th>
+                  <th className="px-5 py-3 font-semibold">Action</th>
+                  <th className="px-5 py-3 font-semibold">Result</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {pageEntries.map((e) => (
+                  <tr key={e.id} className="border-b border-[var(--color-border)] last:border-0">
+                    <td className="whitespace-nowrap px-5 py-3 text-[var(--color-muted)]">
+                      {when(e.created_at)}
+                    </td>
+                    <td className="px-5 py-3">{e.actor_email ?? "—"}</td>
+                    <td className="px-5 py-3 font-medium">{e.action}</td>
+                    <td className="px-5 py-3">
+                      <span
+                        className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${statusTone(
+                          e.status_code
+                        )}`}
+                      >
+                        {e.status_code}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-[var(--color-muted)]">
+              Showing {rangeStart}–{rangeEnd} of {entries.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={currentPage <= 1}
+                className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] px-3 py-1.5 text-sm font-semibold text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                Prev
+              </button>
+              <span className="text-sm text-[var(--color-muted)]">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={currentPage >= totalPages}
+                className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] px-3 py-1.5 text-sm font-semibold text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+                <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

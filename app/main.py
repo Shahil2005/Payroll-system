@@ -54,8 +54,16 @@ async def security_headers(
 
 
 _AUDIT_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-# Login/logout are excluded: high-volume and the actor is only known post-auth.
-_AUDIT_SKIP_PATHS = {"/api/v1/auth/login", "/api/v1/auth/logout"}
+# Paths excluded from the activity trail:
+#  - login/logout: high-volume and the actor is only known post-auth.
+#  - structures/preview: a read-only live calculation (POST only because it
+#    takes a body) fired on every keystroke in the salary-structure form — it
+#    is not a real mutation and would flood the trail.
+_AUDIT_SKIP_PATHS = {
+    "/api/v1/auth/login",
+    "/api/v1/auth/logout",
+    "/api/v1/enterprise/payroll/structures/preview",
+}
 
 
 @app.middleware("http")

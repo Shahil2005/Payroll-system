@@ -105,6 +105,38 @@ class SalaryStructureOut(SalaryStructureBase):
 
 
 # ---------------------------------------------------------------------------
+# Structure preview (live estimate — runs the real engine, persists nothing)
+# ---------------------------------------------------------------------------
+class StructurePreviewIn(BaseModel):
+    """A structure draft to compute without saving. Mirrors the statutory
+    toggles on the structure form; `employee_id` (optional) lets the preview
+    pull the employee's state (PT) and IT declaration (TDS)."""
+
+    employee_id: uuid.UUID | None = None
+    components: list[MoneyLine] = Field(default_factory=list)
+    default_deductions: list[MoneyLine] = Field(default_factory=list)
+    lop_days: Decimal = Field(default=Decimal("0"), ge=0)
+    currency: str = Field(default="INR", max_length=8)
+    pf_enabled: bool = False
+    pf_cap_at_ceiling: bool = True
+    pf_wage_codes: list[str] | None = None
+    esi_enabled: bool = False
+    pt_enabled: bool = False
+    tds_enabled: bool = False
+
+
+class StructurePreviewOut(BaseModel):
+    gross_earnings: Decimal
+    total_deductions: Decimal
+    net_pay: Decimal
+    earnings: list[ResolvedLine] = Field(default_factory=list)
+    deductions: list[ResolvedLine] = Field(default_factory=list)
+    employer_contributions: list[ResolvedLine] = Field(default_factory=list)
+    employer_total: Decimal = Decimal("0.00")
+    statutory: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
 # Payroll cycles
 # ---------------------------------------------------------------------------
 class PayrollCycleBase(BaseModel):

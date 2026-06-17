@@ -221,6 +221,81 @@ def compute_payslip(
     }
 
 
+async def preview_structure(
+    db: AsyncSession, company_id: uuid.UUID, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Compute a payslip for an UNSAVED structure draft (no persistence).
+
+    Drives the live "Estimated Monthly Salary" preview on the structure form so
+    it reflects the SAME engine as a real run — including statutory (PF/ESI/PT)
+    and the TDS estimate. When ``employee_id`` is supplied we load that
+    employee's state (for PT) and IT declaration (for TDS) so the preview
+    matches what the next payroll run will produce.
+    """
+    working_days = Decimal(DEFAULT_WORKING_DAYS)
+    # Clamp LOP into range so a half-typed value never 500s the live preview.
+    raw_lop = Decimal(str(payload.get("lop_days") or "0"))
+    lop_days = max(Decimal("0"), min(raw_lop, working_days))
+
+    pt_state: str | None = None
+    tax_profile: dict[str, Any] | None = None
+    employee_id = payload.get("employee_id")
+    if employee_id is not None:
+        employee = (
+            await db.execute(
+                select(Employee).where(
+                    Employee.id == employee_id,
+                    Employee.company_id == company_id,
+                    Employee.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if employee is not None:
+            pt_state = employee.state
+            if payload.get("tds_enabled"):
+                profile = (
+                    await db.execute(
+                        select(EmployeeTaxProfile).where(
+                            EmployeeTaxProfile.employee_id == employee_id,
+                            EmployeeTaxProfile.company_id == company_id,
+                            EmployeeTaxProfile.deleted_at.is_(None),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if profile is not None:
+                    tax_profile = {
+                        "tax_regime": profile.tax_regime,
+                        "declared_80c": profile.declared_80c,
+                        "declared_80d": profile.declared_80d,
+                        "declared_hra_rent": profile.declared_hra_rent,
+                        "declared_home_loan_interest": profile.declared_home_loan_interest,
+                        "declared_other": profile.declared_other,
+                        "prev_employer_income": profile.prev_employer_income,
+                        "prev_employer_tds": profile.prev_employer_tds,
+                    }
+
+    # Transient (unsaved) structure — compute_payslip only reads attributes.
+    struct = SalaryStructure(
+        company_id=company_id,
+        components=payload.get("components") or [],
+        default_deductions=payload.get("default_deductions") or [],
+        pf_enabled=bool(payload.get("pf_enabled")),
+        pf_cap_at_ceiling=bool(payload.get("pf_cap_at_ceiling", True)),
+        pf_wage_codes=payload.get("pf_wage_codes"),
+        esi_enabled=bool(payload.get("esi_enabled")),
+        pt_enabled=bool(payload.get("pt_enabled")),
+        tds_enabled=bool(payload.get("tds_enabled")),
+    )
+    return compute_payslip(
+        struct,
+        lop_days,
+        working_days,
+        pt_state=pt_state,
+        tds_enabled=bool(payload.get("tds_enabled")),
+        tax_profile=tax_profile,
+    )
+
+
 async def _load_cycle(
     db: AsyncSession, cycle_id: uuid.UUID, company_id: uuid.UUID
 ) -> PayrollCycle:

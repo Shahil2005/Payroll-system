@@ -94,6 +94,9 @@ async def recent(
         await db.execute(
             select(AuditLog)
             .where(AuditLog.company_id == company_id)
+            # Hide read-only live-preview noise that earlier builds recorded
+            # before it was excluded from the audit middleware.
+            .where(~AuditLog.path.like("%/structures/preview"))
             .order_by(AuditLog.created_at.desc())
             .limit(limit)
         )

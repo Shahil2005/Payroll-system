@@ -311,6 +311,9 @@ export const payrollApi = {
   getStructure: (id: string) => apiClient.get<SalaryStructure>(`${P}/structures/${id}`),
   createStructure: (body: Partial<SalaryStructure>) =>
     apiClient.post<SalaryStructure>(`${P}/structures`, body),
+  // Live preview — runs the real engine (incl. statutory + TDS), saves nothing.
+  previewStructure: (body: StructurePreviewIn) =>
+    apiClient.post<StructurePreviewOut>(`${P}/structures/preview`, body),
   updateStructure: (id: string, body: Partial<SalaryStructure>) =>
     apiClient.put<SalaryStructure>(`${P}/structures/${id}`, body),
   deleteStructure: (id: string) => apiClient.del<SalaryStructure>(`${P}/structures/${id}`),
@@ -554,6 +557,32 @@ export interface SalaryEstimate {
   net: number;
   earnings: ResolvedLine[];
   deductions: ResolvedLine[];
+}
+
+/** Draft sent to the server-side preview endpoint (no persistence). */
+export interface StructurePreviewIn {
+  employee_id?: string | null;
+  components: MoneyLine[];
+  default_deductions: MoneyLine[];
+  lop_days: number;
+  pf_enabled: boolean;
+  pf_cap_at_ceiling: boolean;
+  pf_wage_codes?: string[] | null;
+  esi_enabled: boolean;
+  pt_enabled: boolean;
+  tds_enabled: boolean;
+}
+
+/** Result of the server-side preview — the exact engine a run uses. */
+export interface StructurePreviewOut {
+  gross_earnings: number | string;
+  total_deductions: number | string;
+  net_pay: number | string;
+  earnings: ResolvedLine[];
+  deductions: ResolvedLine[];
+  employer_contributions: ResolvedLine[];
+  employer_total: number | string;
+  statutory: Record<string, unknown> | null;
 }
 
 /** Default working-days basis (mirrors backend DEFAULT_WORKING_DAYS). */
