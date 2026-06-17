@@ -30,3 +30,20 @@ class Company(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(160))
     currency: Mapped[str] = mapped_column(String(8), default="INR")
+
+    # ----- Organisation profile (Settings → Organisation Profile) -----
+    # All optional; populated/edited from the Settings screen. Mirrors Zoho
+    # Payroll's Organisation Profile (basic details + address + tax identifiers).
+    legal_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    contact_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    contact_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    address_line1: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    address_line2: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    pincode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    country: Mapped[str] = mapped_column(String(80), default="India", server_default="India")
+    # Org-level statutory tax identifiers (Zoho "Tax Information").
+    pan: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    tan: Mapped[str | None] = mapped_column(String(10), nullable=True)

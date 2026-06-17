@@ -102,6 +102,46 @@ class PayrollCycle(Base, TimestampMixin):
     )
 
 
+class PayrollAdjustment(Base, TimestampMixin):
+    """A one-time earning or deduction attached to a specific cycle + employee
+    (per-run override). Unlike salary-structure lines these do not recur: they
+    apply only to the cycle they belong to. Picked up on the next ``run``.
+
+    Deleting the cycle cascades these away. Editable only while the cycle is
+    DRAFT/PROCESSING (enforced in the router)."""
+
+    __tablename__ = "payroll_adjustments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("uuid_generate_v4()"),
+    )
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        index=True,
+    )
+    cycle_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("payroll_cycles.id", ondelete="CASCADE"),
+        index=True,
+    )
+    employee_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("employees.id"), index=True
+    )
+    # "earning" | "deduction" (constants.AdjustmentKind)
+    kind: Mapped[str] = mapped_column(String(16))
+    code: Mapped[str] = mapped_column(String(64))
+    label: Mapped[str] = mapped_column(String(120))
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_adjustment_cycle_employee", "cycle_id", "employee_id"),
+    )
+
+
 class Payslip(Base, TimestampMixin):
     """One row per employee per cycle (spec §4.3). Earnings/deductions are
     snapshotted at run time, so later structure edits never mutate history."""

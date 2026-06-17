@@ -11,6 +11,10 @@ const NAV: { label: string; icon: string; path: string }[] = [
   { label: "Payroll", icon: "payments", path: "/enterprise/payroll" },
   { label: "Salary Structures", icon: "tune", path: "/enterprise/payroll/structures" },
   { label: "Employees", icon: "groups", path: "/enterprise/employees" },
+  { label: "Reports", icon: "summarize", path: "/enterprise/reports" },
+  { label: "Activity", icon: "history", path: "/enterprise/activity" },
+  { label: "Team", icon: "manage_accounts", path: "/enterprise/team" },
+  { label: "Settings", icon: "settings", path: "/enterprise/settings" },
 ];
 
 export default function EnterpriseLayout({

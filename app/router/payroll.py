@@ -9,8 +9,10 @@ from app.constants import DEFAULT_WORKING_DAYS, PayrollCycleStatus, Permission
 from app.core.dependencies import DBSessionDep, get_current_company_id, require_permission
 from app.models.company import Company
 from app.models.employee import Employee
-from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
+from app.models.payroll import PayrollAdjustment, PayrollCycle, Payslip, SalaryStructure
 from app.schema.payroll import (
+    AdjustmentCreate,
+    AdjustmentOut,
     BulkEmailResult,
     DashboardSummary,
     EmailResult,
@@ -344,6 +346,121 @@ async def delete_payroll_cycle(
         await db.rollback()
         raise
     return cycle
+
+
+# ---------------------------------------------------------------------------
+# Per-run adjustments (one-time earnings/deductions for a cycle)
+# ---------------------------------------------------------------------------
+_EDITABLE_CYCLE_STATUSES = (PayrollCycleStatus.DRAFT, PayrollCycleStatus.PROCESSING)
+
+
+@router.get("/cycles/{id}/adjustments", response_model=list[AdjustmentOut])
+async def list_cycle_adjustments(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> list[PayrollAdjustment]:
+    await payroll_service._load_cycle(db, id, company_id)  # 404s if not in company
+    rows = (
+        await db.execute(
+            select(PayrollAdjustment)
+            .where(
+                PayrollAdjustment.cycle_id == id,
+                PayrollAdjustment.company_id == company_id,
+                PayrollAdjustment.deleted_at.is_(None),
+            )
+            .order_by(PayrollAdjustment.created_at)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+@router.post(
+    "/cycles/{id}/adjustments",
+    response_model=AdjustmentOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_cycle_adjustment(
+    id: uuid.UUID,
+    payload: AdjustmentCreate,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> PayrollAdjustment:
+    """Attach a one-time earning/deduction to a cycle. Re-run the cycle for it to
+    take effect. Allowed only while the cycle is DRAFT or PROCESSING."""
+    cycle = await payroll_service._load_cycle(db, id, company_id)
+    if cycle.status not in _EDITABLE_CYCLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Adjustments can only be changed while the cycle is DRAFT or PROCESSING (is {cycle.status}).",
+        )
+    employee = (
+        await db.execute(
+            select(Employee).where(
+                Employee.id == payload.employee_id,
+                Employee.company_id == company_id,
+                Employee.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found")
+
+    adjustment = PayrollAdjustment(
+        company_id=company_id,
+        cycle_id=id,
+        employee_id=payload.employee_id,
+        kind=payload.kind.value,
+        code=payload.code,
+        label=payload.label,
+        amount=payload.amount,
+        note=payload.note,
+    )
+    db.add(adjustment)
+    try:
+        await db.commit()
+        await db.refresh(adjustment)
+    except Exception:
+        await db.rollback()
+        raise
+    return adjustment
+
+
+@router.delete("/adjustments/{id}", response_model=AdjustmentOut)
+async def delete_adjustment(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> PayrollAdjustment:
+    """Soft-delete an adjustment. Allowed only while its cycle is DRAFT/PROCESSING."""
+    adjustment = (
+        await db.execute(
+            select(PayrollAdjustment).where(
+                PayrollAdjustment.id == id,
+                PayrollAdjustment.company_id == company_id,
+                PayrollAdjustment.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not adjustment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Adjustment not found")
+    cycle = await payroll_service._load_cycle(db, adjustment.cycle_id, company_id)
+    if cycle.status not in _EDITABLE_CYCLE_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Adjustments can only be changed while the cycle is DRAFT or PROCESSING (is {cycle.status}).",
+        )
+    adjustment.deleted_at = datetime.utcnow()
+    try:
+        await db.commit()
+        await db.refresh(adjustment)
+    except Exception:
+        await db.rollback()
+        raise
+    return adjustment
 
 
 # ---------------------------------------------------------------------------

@@ -98,6 +98,31 @@ export interface Payslip {
   statutory?: Record<string, unknown> | null;
 }
 
+export type AdjustmentKind = "earning" | "deduction";
+
+export interface Adjustment {
+  id: string;
+  company_id: string;
+  cycle_id: string;
+  employee_id: string;
+  kind: AdjustmentKind;
+  code: string;
+  label: string;
+  amount: number | string;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewAdjustment {
+  employee_id: string;
+  kind: AdjustmentKind;
+  code: string;
+  label: string;
+  amount: number;
+  note?: string | null;
+}
+
 export interface Employee {
   id: string;
   company_id: string;
@@ -250,7 +275,16 @@ async function downloadFile(path: string): Promise<void> {
   const blob = await res.blob();
   const disposition = res.headers.get("Content-Disposition") || "";
   const match = disposition.match(/filename="?([^"]+)"?/);
-  const filename = match ? match[1] : "download.pdf";
+  // Fallback when the filename header is unavailable: pick an extension from the
+  // content type so a CSV never ends up named ".pdf" (Content-Type is always
+  // exposed to JS; Content-Disposition needs an explicit CORS expose-header).
+  const contentType = res.headers.get("Content-Type") || "";
+  const ext = contentType.includes("csv")
+    ? "csv"
+    : contentType.includes("pdf")
+      ? "pdf"
+      : "bin";
+  const filename = match ? match[1] : `download.${ext}`;
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -286,6 +320,14 @@ export const payrollApi = {
   createCycle: (body: Partial<PayrollCycle>) =>
     apiClient.post<PayrollCycle>(`${P}/cycles`, body),
   runCycle: (id: string) => apiClient.post<RunResult>(`${P}/cycles/${id}/run`),
+
+  // Per-run adjustments (one-time earnings/deductions on a cycle)
+  listAdjustments: (cycleId: string) =>
+    apiClient.get<Adjustment[]>(`${P}/cycles/${cycleId}/adjustments`),
+  addAdjustment: (cycleId: string, body: NewAdjustment) =>
+    apiClient.post<Adjustment>(`${P}/cycles/${cycleId}/adjustments`, body),
+  deleteAdjustment: (id: string) => apiClient.del<Adjustment>(`${P}/adjustments/${id}`),
+
   approveCycle: (id: string) => apiClient.post<PayrollCycle>(`${P}/cycles/${id}/approve`),
   markPaidCycle: (id: string) => apiClient.post<PayrollCycle>(`${P}/cycles/${id}/mark-paid`),
   cancelCycle: (id: string) => apiClient.post<PayrollCycle>(`${P}/cycles/${id}/cancel`),
@@ -308,6 +350,70 @@ export const payrollApi = {
   deleteEmployee: (id: string) => apiClient.del<void>(`${E}/${id}`),
 };
 
+// --- Reports ---------------------------------------------------------------
+const R = "/api/v1/enterprise/reports";
+
+export type ReportFormat = "csv" | "pdf";
+
+export const reportsApi = {
+  salaryRegister: (cycleId: string, format: ReportFormat) =>
+    downloadFile(`${R}/salary-register?cycle_id=${cycleId}&format=${format}`),
+  payrollSummary: (format: ReportFormat) =>
+    downloadFile(`${R}/payroll-summary?format=${format}`),
+};
+
+// --- Settings (organisation profile) ---------------------------------------
+const S = "/api/v1/enterprise/settings";
+
+export interface Organization {
+  id: string;
+  name: string;
+  currency: string;
+  legal_name: string | null;
+  industry: string | null;
+  contact_email: string | null;
+  contact_phone: string | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  country: string;
+  pan: string | null;
+  tan: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type OrganizationUpdate = Partial<
+  Omit<Organization, "id" | "created_at" | "updated_at">
+>;
+
+export const settingsApi = {
+  getOrganization: () => apiClient.get<Organization>(`${S}/organization`),
+  updateOrganization: (body: OrganizationUpdate) =>
+    apiClient.put<Organization>(`${S}/organization`, body),
+};
+
+// --- Audit / activity ------------------------------------------------------
+const AU = "/api/v1/enterprise/audit";
+
+export interface AuditEntry {
+  id: string;
+  company_id: string | null;
+  actor_id: string | null;
+  actor_email: string | null;
+  action: string;
+  method: string;
+  path: string;
+  status_code: number;
+  created_at: string;
+}
+
+export const auditApi = {
+  list: (limit = 100) => apiClient.get<AuditEntry[]>(`${AU}?limit=${limit}`),
+};
+
 // --- Auth ------------------------------------------------------------------
 const A = "/api/v1/auth";
 
@@ -317,11 +423,31 @@ export interface LoginResponse {
   user: AuthUser;
 }
 
+export interface SignupPayload {
+  company_name: string;
+  full_name: string;
+  email: string;
+  password: string;
+}
+
+export type UserRole = "ADMIN" | "HR" | "VIEWER";
+
+export interface NewUserPayload {
+  email: string;
+  password: string;
+  full_name: string;
+  role: UserRole;
+}
+
 export const authApi = {
   login: (email: string, password: string) =>
     apiClient.post<LoginResponse>(`${A}/login`, { email, password }),
+  signup: (body: SignupPayload) => apiClient.post<LoginResponse>(`${A}/signup`, body),
   me: () => apiClient.get<AuthUser>(`${A}/me`),
   logout: () => apiClient.post<{ message: string }>(`${A}/logout`),
+  // Org user administration (ADMIN only).
+  listUsers: () => apiClient.get<AuthUser[]>(`${A}/users`),
+  createUser: (body: NewUserPayload) => apiClient.post<AuthUser>(`${A}/users`, body),
 };
 
 // --- Helpers ---------------------------------------------------------------

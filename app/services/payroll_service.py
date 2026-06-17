@@ -7,9 +7,15 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import DEFAULT_WORKING_DAYS, LineType, PayrollCycleStatus, PayslipStatus
+from app.constants import (
+    DEFAULT_WORKING_DAYS,
+    AdjustmentKind,
+    LineType,
+    PayrollCycleStatus,
+    PayslipStatus,
+)
 from app.models.employee import Employee
-from app.models.payroll import PayrollCycle, Payslip, SalaryStructure
+from app.models.payroll import PayrollAdjustment, PayrollCycle, Payslip, SalaryStructure
 from app.services import statutory as statutory_rules
 
 
@@ -47,6 +53,7 @@ def compute_payslip(
     working_days: Decimal,
     *,
     pt_state: str | None = None,
+    adjustments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Pure payslip calculation (spec §5).
 
@@ -54,11 +61,17 @@ def compute_payslip(
     2. gross = sum(earnings); pro-rate by paid/working days when lop_days > 0.
     3. Resolve deductions the same way (percent_of a code, or percent of gross).
     4. Apply statutory deductions (PF/ESI/PT) when enabled on the structure.
-    5. net = gross - (voluntary + statutory) deductions.
+    5. Apply per-run adjustments (one-time earnings/deductions for this cycle).
+    6. net = gross - (voluntary + statutory + adjustment) deductions.
 
     Statutory is opt-in per structure; with all toggles off the result is
     identical to the pre-statutory calculation. Each resolved line is rounded to
     2 dp before summing (avoids cent drift).
+
+    Adjustments are flat absolute amounts (``{kind, code, label, amount}``): they
+    are added on top of the structure result, are NOT LOP-prorated (a bonus or
+    arrear is an absolute figure), and do NOT change the statutory wage base —
+    PF/ESI/PT are computed on regular structure earnings in step 4.
     """
     if working_days <= 0:
         raise ValueError("working_days must be greater than zero")
@@ -147,6 +160,19 @@ def compute_payslip(
                 {"code": "PT", "label": "Professional Tax", "amount": float(pt["amount"])}
             )
             total_deductions = _q(total_deductions + pt["amount"])
+
+    # --- Per-run adjustments (one-time earnings/deductions for THIS cycle) ---
+    # Flat amounts layered on top of the structure result; see the docstring.
+    for adj in adjustments or []:
+        amt = _q(Decimal(str(adj.get("amount") or "0")))
+        code = adj.get("code", "")
+        label = adj.get("label", code)
+        if adj.get("kind") == AdjustmentKind.EARNING.value:
+            earnings.append({"code": code, "label": label, "amount": float(amt)})
+            gross = _q(gross + amt)
+        elif adj.get("kind") == AdjustmentKind.DEDUCTION.value:
+            deductions.append({"code": code, "label": label, "amount": float(amt)})
+            total_deductions = _q(total_deductions + amt)
 
     employer_total = sum(
         (Decimal(str(c["amount"])) for c in employer_contributions), Decimal("0.00")
@@ -319,6 +345,23 @@ async def run_payroll(
         )
     ).scalars().all()
 
+    # Per-run adjustments for this cycle, grouped by employee. Applied on top of
+    # each payslip in compute_payslip (one-time bonuses/arrears/deductions).
+    adjustments = (
+        await db.execute(
+            select(PayrollAdjustment).where(
+                PayrollAdjustment.cycle_id == cycle_id,
+                PayrollAdjustment.company_id == company_id,
+                PayrollAdjustment.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    adjustments_by_employee: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    for adj in adjustments:
+        adjustments_by_employee.setdefault(adj.employee_id, []).append(
+            {"kind": adj.kind, "code": adj.code, "label": adj.label, "amount": adj.amount}
+        )
+
     created_count = 0
     updated_count = 0
     skipped: list[dict[str, Any]] = []
@@ -355,7 +398,11 @@ async def run_payroll(
 
         try:
             computed = compute_payslip(
-                struct, lop_days, working_days, pt_state=employee.state
+                struct,
+                lop_days,
+                working_days,
+                pt_state=employee.state,
+                adjustments=adjustments_by_employee.get(employee.id),
             )
         except ValueError as exc:
             skipped.append({"employee_id": employee.id, "reason": str(exc)})

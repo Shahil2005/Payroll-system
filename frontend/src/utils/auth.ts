@@ -67,6 +67,10 @@ export const routePermissions: ReadonlyArray<{
   { prefix: "/enterprise/payroll/structures", permission: "payroll:read" },
   { prefix: "/enterprise/payroll", permission: "payroll:read" },
   { prefix: "/enterprise/employees", permission: "payroll:read" },
+  { prefix: "/enterprise/reports", permission: "payroll:read" },
+  { prefix: "/enterprise/activity", permission: "payroll:read" },
+  { prefix: "/enterprise/team", permission: "users:manage" },
+  { prefix: "/enterprise/settings", permission: "users:manage" },
 ];
 
 /** Permission required to view `pathname`, or null when the route is ungated. */

@@ -4,13 +4,15 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   payrollApi,
+  type Adjustment,
+  type AdjustmentKind,
   type Employee,
   type PayrollCycle,
   type Payslip,
   type SkippedEmployee,
   inr,
 } from "@/utils/api";
-import { Banner, StatusBadge } from "@/components/ui";
+import { Banner, Modal, StatusBadge } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
 import { useDialog } from "@/components/DialogProvider";
 
@@ -18,13 +20,21 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
   const { id } = use(params);
   const { can } = useAuth();
   const { confirm } = useDialog();
+  const canEdit = can("payroll:configure");
   const [cycle, setCycle] = useState<PayrollCycle | null>(null);
   const [payslips, setPayslips] = useState<Payslip[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [skipped, setSkipped] = useState<SkippedEmployee[]>([]);
+  const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const emptyAdj = { employee_id: "", kind: "earning" as AdjustmentKind, code: "", label: "", amount: "", note: "" };
+  const [adjOpen, setAdjOpen] = useState(false);
+  const [adjSaving, setAdjSaving] = useState(false);
+  const [adjErr, setAdjErr] = useState<string | null>(null);
+  const [adjForm, setAdjForm] = useState(emptyAdj);
 
   async function load() {
     setLoading(true);
@@ -32,12 +42,48 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
       const c = await payrollApi.getCycle(id);
       setCycle(c);
       if (c.status === "PAID") setPayslips(await payrollApi.listCyclePayslips(id));
+      // Adjustments are editable only before approval; load them then.
+      if (c.status === "DRAFT" || c.status === "PROCESSING") {
+        setAdjustments(await payrollApi.listAdjustments(id));
+      } else {
+        setAdjustments([]);
+      }
       setError(null);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function addAdjustment(e: React.FormEvent) {
+    e.preventDefault();
+    setAdjErr(null);
+    setAdjSaving(true);
+    try {
+      await payrollApi.addAdjustment(id, {
+        employee_id: adjForm.employee_id,
+        kind: adjForm.kind,
+        code: adjForm.code,
+        label: adjForm.label,
+        amount: Number(adjForm.amount),
+        note: adjForm.note || null,
+      });
+      setAdjOpen(false);
+      setAdjForm(emptyAdj);
+      await load();
+    } catch (err) {
+      setAdjErr((err as Error).message);
+    } finally {
+      setAdjSaving(false);
+    }
+  }
+
+  async function removeAdjustment(a: Adjustment) {
+    await act(
+      () => payrollApi.deleteAdjustment(a.id),
+      `Remove "${a.label}" (${inr(a.amount)})?`
+    );
   }
 
   useEffect(() => {
@@ -243,6 +289,188 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
           )}
         </div>
       </div>
+
+      {(cycle.status === "DRAFT" || cycle.status === "PROCESSING") && (
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-6">
+          <div className="mb-4 flex items-center justify-between border-b border-[var(--color-border)] pb-2">
+            <div>
+              <h3 className="font-semibold">Adjustments</h3>
+              <p className="text-xs text-[var(--color-muted)]">
+                One-time bonuses, arrears or deductions for this cycle. Re-run to apply.
+              </p>
+            </div>
+            {canEdit && (
+              <button
+                onClick={() => {
+                  setAdjErr(null);
+                  setAdjForm(emptyAdj);
+                  setAdjOpen(true);
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-2 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)]"
+              >
+                <span className="material-symbols-outlined text-[18px]">add</span>
+                Add Adjustment
+              </button>
+            )}
+          </div>
+          {adjustments.length === 0 ? (
+            <p className="py-6 text-center text-sm text-[var(--color-muted)]">
+              No adjustments. Pay comes only from each employee&apos;s salary structure.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs uppercase text-[var(--color-muted)]">
+                  <tr className="border-b border-[var(--color-border)]">
+                    <th className="px-3 py-2">Employee</th>
+                    <th className="px-3 py-2">Type</th>
+                    <th className="px-3 py-2">Detail</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                    {canEdit && <th className="px-3 py-2" />}
+                  </tr>
+                </thead>
+                <tbody>
+                  {adjustments.map((a) => (
+                    <tr key={a.id} className="border-b border-[var(--color-border)] last:border-0">
+                      <td className="px-3 py-2 font-medium">{name(a.employee_id)}</td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={`rounded px-2 py-0.5 text-xs font-semibold ${
+                            a.kind === "earning"
+                              ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                              : "bg-[var(--color-danger)]/15 text-[var(--color-danger)]"
+                          }`}
+                        >
+                          {a.kind === "earning" ? "Earning" : "Deduction"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        {a.label}{" "}
+                        <span className="font-mono text-xs text-[var(--color-dim)]">{a.code}</span>
+                        {a.note && <div className="text-xs text-[var(--color-muted)]">{a.note}</div>}
+                      </td>
+                      <td
+                        className={`px-3 py-2 text-right font-semibold ${
+                          a.kind === "earning" ? "text-[var(--color-accent)]" : "text-[var(--color-danger)]"
+                        }`}
+                      >
+                        {a.kind === "earning" ? "+ " : "- "}
+                        {inr(a.amount)}
+                      </td>
+                      {canEdit && (
+                        <td className="px-3 py-2 text-right">
+                          <button
+                            onClick={() => removeAdjustment(a)}
+                            disabled={busy}
+                            title="Remove adjustment"
+                            className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--color-dim)] hover:bg-[var(--color-danger)]/10 hover:text-[var(--color-danger)]"
+                          >
+                            <span className="material-symbols-outlined text-[18px]">delete</span>
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {adjOpen && (
+        <Modal title="Add Adjustment" onClose={() => setAdjOpen(false)}>
+          <form onSubmit={addAdjustment} className="flex flex-col gap-4">
+            {adjErr && <Banner>{adjErr}</Banner>}
+            <label className="flex flex-col gap-1.5">
+              <span className="lbl">Employee</span>
+              <select
+                className="input"
+                required
+                value={adjForm.employee_id}
+                onChange={(e) => setAdjForm({ ...adjForm, employee_id: e.target.value })}
+              >
+                <option value="">— Select —</option>
+                {employees.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.first_name} {e.last_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1.5">
+                <span className="lbl">Type</span>
+                <select
+                  className="input"
+                  value={adjForm.kind}
+                  onChange={(e) => setAdjForm({ ...adjForm, kind: e.target.value as AdjustmentKind })}
+                >
+                  <option value="earning">Earning (adds to pay)</option>
+                  <option value="deduction">Deduction (subtracts)</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="lbl">Amount</span>
+                <input
+                  className="input"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  required
+                  value={adjForm.amount}
+                  onChange={(e) => setAdjForm({ ...adjForm, amount: e.target.value })}
+                />
+              </label>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <label className="flex flex-col gap-1.5">
+                <span className="lbl">Code</span>
+                <input
+                  className="input uppercase"
+                  maxLength={64}
+                  required
+                  placeholder="BONUS"
+                  value={adjForm.code}
+                  onChange={(e) => setAdjForm({ ...adjForm, code: e.target.value.toUpperCase() })}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5">
+                <span className="lbl">Label</span>
+                <input
+                  className="input"
+                  maxLength={120}
+                  required
+                  placeholder="Festival Bonus"
+                  value={adjForm.label}
+                  onChange={(e) => setAdjForm({ ...adjForm, label: e.target.value })}
+                />
+              </label>
+            </div>
+            <label className="flex flex-col gap-1.5">
+              <span className="lbl">Note (optional)</span>
+              <input
+                className="input"
+                maxLength={500}
+                value={adjForm.note}
+                onChange={(e) => setAdjForm({ ...adjForm, note: e.target.value })}
+              />
+            </label>
+            <div className="flex gap-3">
+              <button type="submit" disabled={adjSaving} className="btn-primary">
+                {adjSaving ? "Adding…" : "Add Adjustment"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdjOpen(false)}
+                className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] py-2.5 text-sm font-semibold"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }

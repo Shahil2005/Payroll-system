@@ -8,6 +8,7 @@ Infra notes (unchanged rationale):
 - compute_payslip is pure Decimal math, called directly in unit tests.
 """
 import contextlib
+import os
 from decimal import Decimal
 from typing import Any, Generator, Iterator
 
@@ -22,7 +23,37 @@ from app.main import app
 from app.models.payroll import SalaryStructure
 from app.services.payroll_service import compute_payslip
 
-_DSN = "host=localhost port=5432 dbname=payroll_test user=postgres password=mysql"
+# DSN is env-overridable: set PAYROLL_TEST_DSN. Defaults to a DEDICATED scratch
+# database (`payroll_scratch`), SEPARATE from the dev app's DB (`payroll_test`),
+# so the destructive fixtures below can never wipe real data. Create/migrate it
+# with: `python scripts/setup_test_db.py` (or DB_NAME=payroll_scratch alembic
+# upgrade head).
+_DSN = os.getenv(
+    "PAYROLL_TEST_DSN",
+    "host=localhost port=5432 dbname=payroll_scratch user=postgres password=mysql",
+)
+
+# Safety guard (belt-and-suspenders with the separate DB above). The fixtures
+# TRUNCATE tables, so require an explicit opt-in: set PAYROLL_ALLOW_DB_WIPE=1.
+# A bare `pytest` skips them. NEVER point PAYROLL_TEST_DSN at the dev DB.
+_ALLOW_DB_WIPE = os.getenv("PAYROLL_ALLOW_DB_WIPE") == "1"
+
+
+def _require_wipe_allowed() -> None:
+    # Hard stop: never let the destructive fixtures run against the dev database,
+    # whatever the flags say. This is the guarantee that test runs can't wipe
+    # data you entered through the app.
+    if "payroll_test" in _DSN:
+        raise RuntimeError(
+            "Refusing to run destructive tests against the dev database "
+            "'payroll_test'. Point PAYROLL_TEST_DSN at the scratch DB "
+            "('payroll_scratch') instead."
+        )
+    if not _ALLOW_DB_WIPE:
+        pytest.skip(
+            "Destructive DB fixtures are disabled. Set PAYROLL_ALLOW_DB_WIPE=1 "
+            "to run them (defaults to the dedicated 'payroll_scratch' DB).",
+        )
 
 COMPANY_ID = "00000000-0000-0000-0000-000000000001"
 EMP1 = "11111111-1111-1111-1111-111111111111"  # has a salary structure
@@ -77,6 +108,22 @@ def _token(client: TestClient, email: str, password: str) -> str:
     return resp.json()["access_token"]
 
 
+def _delete_user_and_company(email: str) -> None:
+    """Remove any user with this email and its owning company (FK cascade drops
+    the user too). Used to keep self-service signup tests idempotent, since the
+    db_setup fixture does not truncate users/companies."""
+    conn = psycopg2.connect(_DSN)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("SELECT company_id FROM users WHERE email = %s;", (email,))
+    for (company_id,) in cur.fetchall():
+        if str(company_id) == COMPANY_ID:
+            continue  # never drop the shared default company
+        cur.execute("DELETE FROM companies WHERE id = %s;", (str(company_id),))
+    cur.close()
+    conn.close()
+
+
 @contextlib.contextmanager
 def authed_client(creds: tuple[str, str] = ADMIN) -> Iterator[TestClient]:
     """A TestClient with a Bearer token pre-set for the given user."""
@@ -88,6 +135,7 @@ def authed_client(creds: tuple[str, str] = ADMIN) -> Iterator[TestClient]:
 
 @pytest.fixture(autouse=True)
 def db_setup() -> Generator[None, None, None]:
+    _require_wipe_allowed()  # skips the test if PAYROLL_ALLOW_DB_WIPE != "1"
     _reset_db()
     yield
     conn = psycopg2.connect(_DSN)
@@ -463,6 +511,267 @@ def test_users_admin_only() -> None:
         assert c.get("/api/v1/auth/users").status_code == status.HTTP_200_OK
     with authed_client(VIEWER) as c:
         assert c.get("/api/v1/auth/users").status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_signup_creates_org_and_admin() -> None:
+    """Public signup provisions a new company + its first user as ADMIN, returns
+    a working token, and rejects a duplicate email."""
+    email = "founder@newco-signup.com"
+    _delete_user_and_company(email)  # in case a prior run was interrupted
+    try:
+        with TestClient(app) as c:
+            resp = c.post(
+                "/api/v1/auth/signup",
+                json={
+                    "company_name": "NewCo Industries",
+                    "full_name": "Fran Founder",
+                    "email": email,
+                    "password": "secret123",
+                },
+            )
+            assert resp.status_code == status.HTTP_201_CREATED, resp.text
+            body = resp.json()
+            assert body["user"]["role"] == "ADMIN"
+            assert body["user"]["company_id"] != COMPANY_ID  # a brand-new tenant
+            assert "users:manage" in body["user"]["permissions"]
+
+            # The returned token authenticates against a protected endpoint.
+            me = c.get(
+                "/api/v1/auth/me",
+                headers={"Authorization": f"Bearer {body['access_token']}"},
+            )
+            assert me.status_code == status.HTTP_200_OK
+            assert me.json()["email"] == email
+
+            # Email is globally unique (login resolves by email alone) -> 409.
+            dup = c.post(
+                "/api/v1/auth/signup",
+                json={
+                    "company_name": "Another Co",
+                    "full_name": "Imposter",
+                    "email": email,
+                    "password": "secret123",
+                },
+            )
+            assert dup.status_code == status.HTTP_409_CONFLICT
+    finally:
+        _delete_user_and_company(email)
+
+
+# ---------------------------------------------------------------------------
+# Per-run adjustments (bonuses / arrears / one-time deductions)
+# ---------------------------------------------------------------------------
+def _add_adjustment(c: TestClient, cid: str, **body: Any) -> Any:
+    return c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/adjustments", json=body)
+
+
+def test_run_applies_earning_and_deduction_adjustments() -> None:
+    """A bonus (earning) adds to gross/net; a recovery (deduction) subtracts.
+    Both surface as snapshot lines on the payslip."""
+    with authed_client() as c:
+        _create_structure(c, employee_id=EMP1)  # gross 56000, deductions 1800
+        cid = _create_cycle(c)["id"]
+
+        assert _add_adjustment(
+            c, cid, employee_id=EMP1, kind="earning",
+            code="BONUS", label="Festival Bonus", amount=5000,
+        ).status_code == status.HTTP_201_CREATED
+        assert _add_adjustment(
+            c, cid, employee_id=EMP1, kind="deduction",
+            code="RECOVERY", label="Advance Recovery", amount=1000,
+        ).status_code == status.HTTP_201_CREATED
+
+        assert c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run").status_code == status.HTTP_200_OK
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+
+        slips = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()
+        slip = next(s for s in slips if s["employee_id"] == EMP1)
+        assert float(slip["gross_earnings"]) == 61000.0   # 56000 + 5000 bonus
+        assert float(slip["total_deductions"]) == 2800.0  # 1800 + 1000 recovery
+        assert float(slip["net_pay"]) == 58200.0
+
+        detail = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}").json()
+        assert "BONUS" in {e["code"] for e in detail["earnings"]}
+        assert "RECOVERY" in {d["code"] for d in detail["deductions"]}
+
+
+def test_adjustments_listed_and_locked_after_approve() -> None:
+    with authed_client() as c:
+        _create_structure(c, employee_id=EMP1)
+        cid = _create_cycle(c)["id"]
+        add = _add_adjustment(
+            c, cid, employee_id=EMP1, kind="earning", code="BONUS", label="Bonus", amount=2000
+        )
+        assert add.status_code == status.HTTP_201_CREATED, add.text
+        adj_id = add.json()["id"]
+
+        listed = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/adjustments").json()
+        assert [a["id"] for a in listed] == [adj_id]
+
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        # Approved cycle is locked: no further add or delete.
+        assert _add_adjustment(
+            c, cid, employee_id=EMP1, kind="earning", code="X", label="X", amount=1
+        ).status_code == status.HTTP_409_CONFLICT
+        assert c.delete(
+            f"/api/v1/enterprise/payroll/adjustments/{adj_id}"
+        ).status_code == status.HTTP_409_CONFLICT
+
+
+def test_delete_adjustment_excludes_it_from_run() -> None:
+    with authed_client() as c:
+        _create_structure(c, employee_id=EMP1)
+        cid = _create_cycle(c)["id"]
+        adj_id = _add_adjustment(
+            c, cid, employee_id=EMP1, kind="earning", code="BONUS", label="Bonus", amount=5000
+        ).json()["id"]
+        assert c.delete(
+            f"/api/v1/enterprise/payroll/adjustments/{adj_id}"
+        ).status_code == status.HTTP_200_OK
+
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+        slips = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()
+        slip = next(s for s in slips if s["employee_id"] == EMP1)
+        assert float(slip["gross_earnings"]) == 56000.0  # bonus removed before run
+
+
+# ---------------------------------------------------------------------------
+# Reports & registers
+# ---------------------------------------------------------------------------
+def test_salary_register_and_payroll_summary_reports() -> None:
+    with authed_client() as c:
+        _create_structure(c, employee_id=EMP1)
+        cid = _create_cycle(c)["id"]
+
+        # No payslips yet (DRAFT) -> register is 409.
+        assert c.get(
+            f"/api/v1/enterprise/reports/salary-register?cycle_id={cid}"
+        ).status_code == status.HTTP_409_CONFLICT
+
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+
+        # Salary register CSV (available at PROCESSING — internal HR report).
+        csv_resp = c.get(
+            f"/api/v1/enterprise/reports/salary-register?cycle_id={cid}&format=csv"
+        )
+        assert csv_resp.status_code == status.HTTP_200_OK
+        assert csv_resp.headers["content-type"].startswith("text/csv")
+        body = csv_resp.content.decode("utf-8-sig")
+        assert "Employee Name" in body and "Net Pay" in body
+        assert "John" in body  # EMP1's first name from the seed
+
+        # Salary register PDF.
+        pdf_resp = c.get(
+            f"/api/v1/enterprise/reports/salary-register?cycle_id={cid}&format=pdf"
+        )
+        assert pdf_resp.status_code == status.HTTP_200_OK
+        assert pdf_resp.headers["content-type"] == "application/pdf"
+        assert pdf_resp.content[:4] == b"%PDF"
+
+        # Payroll summary CSV lists the cycle.
+        sum_resp = c.get("/api/v1/enterprise/reports/payroll-summary?format=csv")
+        assert sum_resp.status_code == status.HTTP_200_OK
+        assert "Cycle" in sum_resp.content.decode("utf-8-sig")
+
+
+# ---------------------------------------------------------------------------
+# Settings — organisation profile
+# ---------------------------------------------------------------------------
+def test_organization_profile_get_and_update() -> None:
+    with authed_client() as c:  # ADMIN
+        org = c.get("/api/v1/enterprise/settings/organization")
+        assert org.status_code == status.HTTP_200_OK, org.text
+        assert org.json()["id"] == COMPANY_ID
+
+        upd = c.put(
+            "/api/v1/enterprise/settings/organization",
+            json={
+                "name": "Croar Technologies Pvt Ltd",
+                "industry": "Information Technology",
+                "city": "Bengaluru",
+                "country": "India",
+                "pan": "aaapz1234c",  # lower-case -> normalised to upper
+                "contact_email": "",  # blank -> stored as null
+            },
+        )
+        assert upd.status_code == status.HTTP_200_OK, upd.text
+        body = upd.json()
+        assert body["name"] == "Croar Technologies Pvt Ltd"
+        assert body["industry"] == "Information Technology"
+        assert body["pan"] == "AAAPZ1234C"
+        assert body["contact_email"] is None
+
+        # Persisted.
+        again = c.get("/api/v1/enterprise/settings/organization").json()
+        assert again["city"] == "Bengaluru"
+        assert again["pan"] == "AAAPZ1234C"
+
+
+def test_organization_update_is_admin_only() -> None:
+    with authed_client(VIEWER) as c:
+        assert c.get("/api/v1/enterprise/settings/organization").status_code == status.HTTP_200_OK
+        resp = c.put(
+            "/api/v1/enterprise/settings/organization", json={"name": "Hacked"}
+        )
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# Audit trail
+# ---------------------------------------------------------------------------
+def _truncate_audit() -> None:
+    conn = psycopg2.connect(_DSN)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE audit_logs;")
+    cur.close()
+    conn.close()
+
+
+def test_audit_trail_records_actions_with_actor() -> None:
+    _truncate_audit()
+    with authed_client() as c:  # ADMIN
+        _create_structure(c, employee_id=EMP1)
+        cid = _create_cycle(c)["id"]
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+
+        entries = c.get("/api/v1/enterprise/audit").json()
+        actions = [e["action"] for e in entries]
+        assert "Created payroll cycle" in actions
+        assert "Ran payroll cycle" in actions
+        assert "Approved payroll cycle" in actions
+        # Newest first.
+        assert entries[0]["created_at"] >= entries[-1]["created_at"]
+        # Actor email is snapshotted; status captured.
+        approve = next(e for e in entries if e["action"] == "Approved payroll cycle")
+        assert approve["actor_email"] == ADMIN[0]
+        assert approve["status_code"] == status.HTTP_200_OK
+
+
+def test_audit_records_denied_actions() -> None:
+    """A VIEWER's blocked mutation (403) is still recorded, with the actor."""
+    _truncate_audit()
+    with authed_client(VIEWER) as c:
+        cid_attempt = c.post(
+            "/api/v1/enterprise/payroll/cycles",
+            json={
+                "name": "Nope",
+                "period_start": "2026-06-01",
+                "period_end": "2026-06-30",
+                "pay_date": "2026-07-01",
+            },
+        )
+        assert cid_attempt.status_code == status.HTTP_403_FORBIDDEN
+
+    with authed_client() as c:  # ADMIN reads the trail
+        entries = c.get("/api/v1/enterprise/audit").json()
+        denied = [e for e in entries if e["status_code"] == status.HTTP_403_FORBIDDEN]
+        assert any(e["actor_email"] == VIEWER[0] for e in denied)
 
 
 # ---------------------------------------------------------------------------

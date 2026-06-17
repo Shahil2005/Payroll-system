@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { authApi } from "@/utils/api";
+import { authApi, type SignupPayload } from "@/utils/api";
 import {
   clearSession,
   getStoredUser,
@@ -16,6 +16,7 @@ interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  signup: (payload: SignupPayload) => Promise<void>;
   logout: () => Promise<void>;
   can: (permission: Permission) => boolean;
 }
@@ -50,6 +51,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(res.user);
   }, []);
 
+  const signup = useCallback(async (payload: SignupPayload) => {
+    const res = await authApi.signup(payload);
+    setSession(res.access_token, res.user);
+    setUser(res.user);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await authApi.logout();
@@ -64,7 +71,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const can = useCallback((permission: Permission) => userCan(user, permission), [user]);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, can }}>
+    <AuthContext.Provider value={{ user, loading, login, signup, logout, can }}>
       {children}
     </AuthContext.Provider>
   );

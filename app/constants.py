@@ -42,6 +42,18 @@ class PayFrequency(str, Enum):
     WEEKLY = "WEEKLY"
 
 
+class AdjustmentKind(str, Enum):
+    """A per-cycle, one-time pay line (not stored on the salary structure).
+
+    EARNING adds to gross (bonus, arrears, ad-hoc pay); DEDUCTION subtracts
+    (recovery, one-off deduction). Flat amounts: not LOP-prorated and outside
+    the statutory wage base — see compute_payslip.
+    """
+
+    EARNING = "earning"
+    DEDUCTION = "deduction"
+
+
 # ----- Auth / RBAC (spec §7) -----------------------------------------------
 # Permissions are fine-grained `payroll:*` capabilities. Routes require a
 # specific permission; roles are bundles of permissions. The frontend hides

@@ -5,7 +5,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.constants import LineType, PayFrequency, PayrollCycleStatus, PayslipStatus
+from app.constants import (
+    AdjustmentKind,
+    LineType,
+    PayFrequency,
+    PayrollCycleStatus,
+    PayslipStatus,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +169,34 @@ class PayslipDetailOut(PayslipOut):
     deductions: list[ResolvedLine]
     employer_contributions: list[ResolvedLine] = Field(default_factory=list)
     statutory: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Per-run adjustments (one-time earnings/deductions for a cycle)
+# ---------------------------------------------------------------------------
+class AdjustmentCreate(BaseModel):
+    employee_id: uuid.UUID
+    kind: AdjustmentKind
+    code: str = Field(..., min_length=1, max_length=64)
+    label: str = Field(..., min_length=1, max_length=120)
+    amount: Decimal = Field(..., gt=0, description="Absolute amount (sign comes from kind)")
+    note: str | None = Field(default=None, max_length=500)
+
+
+class AdjustmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    company_id: uuid.UUID
+    cycle_id: uuid.UUID
+    employee_id: uuid.UUID
+    kind: AdjustmentKind
+    code: str
+    label: str
+    amount: Decimal
+    note: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 # ---------------------------------------------------------------------------

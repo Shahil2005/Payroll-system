@@ -6,21 +6,17 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/AuthProvider";
 import { Banner } from "@/components/ui";
 
-const DEMO = [
-  { label: "Admin", email: "admin@croar.com", password: "admin123" },
-  { label: "HR", email: "hr@croar.com", password: "hr123" },
-  { label: "Viewer", email: "viewer@croar.com", password: "viewer123" },
-];
-
-export default function LoginPage() {
+export default function SignupPage() {
   const router = useRouter();
-  const { user, loading, login } = useAuth();
+  const { user, loading, signup } = useAuth();
+  const [companyName, setCompanyName] = useState("");
+  const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // Already signed in -> skip the login screen.
+  // Already signed in -> skip the signup screen.
   useEffect(() => {
     if (!loading && user) router.replace("/enterprise/dashboard");
   }, [loading, user, router]);
@@ -30,7 +26,12 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await login(email, password);
+      await signup({
+        company_name: companyName,
+        full_name: fullName,
+        email,
+        password,
+      });
       router.replace("/enterprise/dashboard");
     } catch (err) {
       setError((err as Error).message);
@@ -46,8 +47,10 @@ export default function LoginPage() {
           <span className="material-symbols-outlined text-4xl text-[var(--color-primary)]">
             payments
           </span>
-          <h1 className="text-2xl font-bold tracking-tight">Croar Payroll</h1>
-          <p className="text-sm text-[var(--color-muted)]">Sign in to continue</p>
+          <h1 className="text-2xl font-bold tracking-tight">Create your organization</h1>
+          <p className="text-sm text-[var(--color-muted)]">
+            Set up a new Croar Payroll workspace
+          </p>
         </div>
 
         <form
@@ -56,7 +59,27 @@ export default function LoginPage() {
         >
           {error && <Banner>{error}</Banner>}
           <label className="flex flex-col gap-1.5">
-            <span className="lbl">Email</span>
+            <span className="lbl">Organization name</span>
+            <input
+              className="input"
+              autoComplete="organization"
+              required
+              value={companyName}
+              onChange={(e) => setCompanyName(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="lbl">Your name</span>
+            <input
+              className="input"
+              autoComplete="name"
+              required
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="lbl">Work email</span>
             <input
               className="input"
               type="email"
@@ -71,45 +94,26 @@ export default function LoginPage() {
             <input
               className="input"
               type="password"
-              autoComplete="current-password"
+              autoComplete="new-password"
               required
+              minLength={6}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
+            <span className="text-xs text-[var(--color-dim)]">At least 6 characters.</span>
           </label>
           <button type="submit" disabled={submitting} className="btn-primary">
-            {submitting ? "Signing in…" : "Sign In"}
+            {submitting ? "Creating…" : "Create organization"}
           </button>
+          <p className="text-center text-xs text-[var(--color-muted)]">
+            You&apos;ll be the administrator and can invite teammates afterwards.
+          </p>
         </form>
 
-        <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-            Demo accounts
-          </p>
-          <div className="flex flex-col gap-1.5">
-            {DEMO.map((d) => (
-              <button
-                key={d.email}
-                type="button"
-                onClick={() => {
-                  setEmail(d.email);
-                  setPassword(d.password);
-                }}
-                className="flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-[var(--color-hover)]"
-              >
-                <span className="font-medium">{d.label}</span>
-                <span className="font-mono text-xs text-[var(--color-dim)]">
-                  {d.email}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-
         <p className="mt-6 text-center text-sm text-[var(--color-muted)]">
-          Don&apos;t have an organization?{" "}
-          <Link href="/signup" className="font-semibold text-[var(--color-primary)] hover:underline">
-            Create one
+          Already have an account?{" "}
+          <Link href="/login" className="font-semibold text-[var(--color-primary)] hover:underline">
+            Sign in
           </Link>
         </p>
       </div>

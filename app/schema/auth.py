@@ -37,3 +37,13 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=6)
     full_name: str = Field(default="", max_length=160)
     role: Role = Role.VIEWER
+
+
+class SignupRequest(BaseModel):
+    """Self-service registration: provisions a brand-new organization (company)
+    and its first user, who becomes that org's ADMIN."""
+
+    company_name: str = Field(..., min_length=1, max_length=160)
+    full_name: str = Field(default="", max_length=160)
+    email: EmailStr
+    password: str = Field(..., min_length=6)
