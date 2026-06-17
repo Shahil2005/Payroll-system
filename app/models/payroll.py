@@ -59,6 +59,16 @@ class SalaryStructure(Base, TimestampMixin):
     # computed from the employee's IT declaration and deducted on the payslip.
     tds_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
 
+    # Traceability: the template this structure was generated from, if any.
+    # Nullable — structures can still be authored directly. ON DELETE SET NULL so
+    # deleting a template never cascades into employee pay.
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("salary_templates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     employee: Mapped["Employee"] = relationship(back_populates="salary_structures")
 
     __table_args__ = (
@@ -68,6 +78,52 @@ class SalaryStructure(Base, TimestampMixin):
             "employee_id",
             unique=True,
             postgresql_where=text("is_active AND deleted_at IS NULL"),
+        ),
+    )
+
+
+class SalaryTemplate(Base, TimestampMixin):
+    """A reusable, CTC-driven salary template (like Zoho/RazorpayX "Salary
+    Templates"). Unlike a SalaryStructure it carries no employee or CTC — its
+    component lines are *rules* (percent-of-CTC + a balancing line), so applying
+    it to any employee scales the amounts to that employee's CTC. Applying a
+    template snapshots its lines into a per-employee SalaryStructure (see
+    payroll_service.apply_template); the structure keeps `template_id` for
+    traceability, but is otherwise independent thereafter."""
+
+    __tablename__ = "salary_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuid_generate_v4()")
+    )
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    currency: Mapped[str] = mapped_column(String(8), default="INR")
+    pay_frequency: Mapped[str] = mapped_column(String(16), default="MONTHLY")
+    # Same JSON shape as SalaryStructure; lines may use percent_of="CTC" and a
+    # type="balance" line so the package stays CTC-driven.
+    components: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    default_deductions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+
+    # ----- Statutory toggles (copied onto structures at apply time) -----
+    pf_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    pf_cap_at_ceiling: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
+    pf_wage_codes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True, default=None)
+    esi_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    pt_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    tds_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+
+    __table_args__ = (
+        # Template names are unique per company (amongst non-deleted rows).
+        Index(
+            "idx_unique_template_name",
+            "company_id",
+            "name",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
     )
 

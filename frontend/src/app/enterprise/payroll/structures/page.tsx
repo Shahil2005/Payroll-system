@@ -18,7 +18,7 @@ import { useDialog } from "@/components/DialogProvider";
 interface LineDraft {
   code: string;
   label: string;
-  type: "fixed" | "percent";
+  type: "fixed" | "percent" | "balance";
   amount: string;
   percent: string;
   percent_of: string;
@@ -36,17 +36,17 @@ const emptyLine = (): LineDraft => ({
 function toMoneyLines(rows: LineDraft[]): MoneyLine[] {
   return rows
     .filter((r) => r.code.trim())
-    .map((r) =>
-      r.type === "fixed"
-        ? { code: r.code.trim(), label: r.label.trim() || r.code.trim(), type: "fixed", amount: Number(r.amount) || 0 }
-        : {
-            code: r.code.trim(),
-            label: r.label.trim() || r.code.trim(),
-            type: "percent",
-            percent: Number(r.percent) || 0,
-            percent_of: r.percent_of || null,
-          }
-    );
+    .map((r) => {
+      const base = { code: r.code.trim(), label: r.label.trim() || r.code.trim() };
+      if (r.type === "balance") return { ...base, type: "balance" as const };
+      if (r.type === "fixed") return { ...base, type: "fixed" as const, amount: Number(r.amount) || 0 };
+      return {
+        ...base,
+        type: "percent" as const,
+        percent: Number(r.percent) || 0,
+        percent_of: r.percent_of || null,
+      };
+    });
 }
 
 function fromMoneyLines(lines: MoneyLine[]): LineDraft[] {
@@ -116,8 +116,16 @@ export default function StructuresPage() {
   // Instant local estimate (manual lines only) — shown immediately while the
   // authoritative server preview (which also includes statutory + TDS) loads.
   const estimate = useMemo(
-    () => estimateSalary(toMoneyLines(earnings), toMoneyLines(deductions), Number(lopDays) || 0),
-    [earnings, deductions, lopDays]
+    () =>
+      estimateSalary(
+        toMoneyLines(earnings),
+        toMoneyLines(deductions),
+        Number(lopDays) || 0,
+        undefined,
+        Number(ctc) || 0,
+        payFrequency
+      ),
+    [earnings, deductions, lopDays, ctc, payFrequency]
   );
   const earningCodes = earnings.map((e) => e.code).filter(Boolean);
 
@@ -134,6 +142,8 @@ export default function StructuresPage() {
       payrollApi
         .previewStructure({
           employee_id: employeeId || null,
+          ctc: Number(ctc) || 0,
+          pay_frequency: payFrequency,
           components: toMoneyLines(earnings),
           default_deductions: toMoneyLines(deductions),
           lop_days: Number(lopDays) || 0,
@@ -157,7 +167,7 @@ export default function StructuresPage() {
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [open, employeeId, earnings, deductions, lopDays, pfEnabled, pfCap, esiEnabled, ptEnabled, tdsEnabled]);
+  }, [open, employeeId, ctc, payFrequency, earnings, deductions, lopDays, pfEnabled, pfCap, esiEnabled, ptEnabled, tdsEnabled]);
 
   // Prefer the server figures once available; fall back to the local estimate.
   const gross = preview ? Number(preview.gross_earnings) : estimate.gross;
@@ -739,10 +749,11 @@ function LineSection({
             <select
               className="input col-span-2"
               value={r.type}
-              onChange={(e) => update(i, { type: e.target.value as "fixed" | "percent" })}
+              onChange={(e) => update(i, { type: e.target.value as LineDraft["type"] })}
             >
               <option value="fixed">Fixed</option>
               <option value="percent">Percent</option>
+              <option value="balance">Balance (CTC)</option>
             </select>
             {r.type === "fixed" ? (
               <input
@@ -752,6 +763,10 @@ function LineSection({
                 value={r.amount}
                 onChange={(e) => update(i, { amount: e.target.value })}
               />
+            ) : r.type === "balance" ? (
+              <span className="col-span-4 self-center text-xs text-[var(--color-muted)]">
+                Absorbs the remaining CTC after the other earnings.
+              </span>
             ) : (
               <>
                 <input
@@ -767,6 +782,7 @@ function LineSection({
                   onChange={(e) => update(i, { percent_of: e.target.value })}
                 >
                   <option value="">of gross</option>
+                  <option value="CTC">of CTC</option>
                   {earningCodes
                     .filter((c) => c && c !== r.code)
                     .map((c) => (

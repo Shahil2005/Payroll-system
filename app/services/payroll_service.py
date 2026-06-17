@@ -8,15 +8,23 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
+    CTC_CODE,
     DEFAULT_WORKING_DAYS,
     AdjustmentKind,
     LineType,
+    PayFrequency,
     PayrollCycleStatus,
     PayslipStatus,
     TaxRegime,
 )
 from app.models.employee import Employee
-from app.models.payroll import PayrollAdjustment, PayrollCycle, Payslip, SalaryStructure
+from app.models.payroll import (
+    PayrollAdjustment,
+    PayrollCycle,
+    Payslip,
+    SalaryStructure,
+    SalaryTemplate,
+)
 from app.models.taxes import EmployeeTaxProfile
 from app.services import statutory as statutory_rules
 from app.services import tax_engine
@@ -88,16 +96,45 @@ def compute_payslip(
     paid_days = working_days - lop_days
     multiplier = (paid_days / working_days) if lop_days > 0 else Decimal("1")
 
+    # Per-period cost-to-company: lets components be defined as a % of CTC and a
+    # "balance" line absorb the remainder, so the package stays CTC-driven.
+    # Components are monthly amounts on a 30-day basis, so MONTHLY divides the
+    # annual CTC by 12 (WEEKLY by 52).
+    divisor = (
+        Decimal("52")
+        if str(structure.pay_frequency) == PayFrequency.WEEKLY.value
+        else Decimal("12")
+    )
+    period_ctc = _q(Decimal(str(structure.ctc)) / divisor) if structure.ctc else Decimal("0")
+
     # --- Pass 1: resolve earnings on the raw (un-prorated) basis ---
-    raw_by_code: dict[str, Decimal] = {}
+    # "CTC" is a reserved reference (not an earning, so it never adds to gross);
+    # percent lines may target it via percent_of. Balance lines are deferred to a
+    # second pass since they depend on the sum of every other earning.
+    raw_by_code: dict[str, Decimal] = {CTC_CODE: period_ctc}
     raw_gross = Decimal("0")
     raw_lines: list[tuple[str, str, Decimal]] = []
+    balance_lines: list[dict[str, Any]] = []
     for line in structure.components or []:
+        if line.get("type") == LineType.BALANCE.value:
+            balance_lines.append(line)
+            continue
         amt = _q(_resolve_amount(line, raw_by_code, raw_gross))
         code = line["code"]
         raw_by_code[code] = amt
         raw_gross += amt
         raw_lines.append((code, line.get("label", code), amt))
+
+    # Balance line(s) split the CTC remainder (never negative); shared equally if
+    # more than one is defined.
+    if balance_lines:
+        remainder = period_ctc - raw_gross
+        share = _q(remainder / Decimal(len(balance_lines))) if remainder > 0 else Decimal("0")
+        for line in balance_lines:
+            code = line["code"]
+            raw_by_code[code] = share
+            raw_gross += share
+            raw_lines.append((code, line.get("label", code), share))
 
     # --- Apply LOP pro-ration uniformly to each earning line ---
     earnings: list[dict[str, Any]] = []
@@ -110,8 +147,9 @@ def compute_payslip(
         earnings.append({"code": code, "label": label, "amount": float(amt)})
 
     # --- Deductions (resolved against prorated earnings + gross) ---
+    # CTC is also referenceable here (a fixed per-period base, not prorated).
     deductions: list[dict[str, Any]] = []
-    ded_ref: dict[str, Decimal] = dict(by_code)
+    ded_ref: dict[str, Decimal] = {CTC_CODE: period_ctc, **by_code}
     total_deductions = Decimal("0.00")
     for line in structure.default_deductions or []:
         amt = _q(_resolve_amount(line, ded_ref, gross))
@@ -277,6 +315,8 @@ async def preview_structure(
     # Transient (unsaved) structure — compute_payslip only reads attributes.
     struct = SalaryStructure(
         company_id=company_id,
+        ctc=Decimal(str(payload.get("ctc") or "0")),
+        pay_frequency=str(payload.get("pay_frequency") or PayFrequency.MONTHLY.value),
         components=payload.get("components") or [],
         default_deductions=payload.get("default_deductions") or [],
         pf_enabled=bool(payload.get("pf_enabled")),
@@ -294,6 +334,101 @@ async def preview_structure(
         tds_enabled=bool(payload.get("tds_enabled")),
         tax_profile=tax_profile,
     )
+
+
+async def apply_template(
+    db: AsyncSession,
+    company_id: uuid.UUID,
+    template_id: uuid.UUID,
+    assignments: list[dict[str, Any]],
+    replace_existing: bool,
+) -> dict[str, Any]:
+    """Generate per-employee salary structures from a template.
+
+    The template's component rules (percent-of-CTC + balance line) are snapshotted
+    onto each structure, stamped with that employee's CTC and effective date — so
+    the same template yields different absolute amounts per employee while staying
+    CTC-driven. Employees that don't exist (or already have an active structure
+    when ``replace_existing`` is False) are skipped, not failed.
+    """
+    template = (
+        await db.execute(
+            select(SalaryTemplate).where(
+                SalaryTemplate.id == template_id,
+                SalaryTemplate.company_id == company_id,
+                SalaryTemplate.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if template is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+
+    created: list[uuid.UUID] = []
+    skipped: list[dict[str, Any]] = []
+    try:
+        for a in assignments:
+            employee_id = a["employee_id"]
+            employee = (
+                await db.execute(
+                    select(Employee).where(
+                        Employee.id == employee_id,
+                        Employee.company_id == company_id,
+                        Employee.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if employee is None:
+                skipped.append({"employee_id": employee_id, "reason": "Employee not found"})
+                continue
+
+            existing = (
+                await db.execute(
+                    select(SalaryStructure).where(
+                        SalaryStructure.employee_id == employee_id,
+                        SalaryStructure.company_id == company_id,
+                        SalaryStructure.is_active.is_(True),
+                        SalaryStructure.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                if not replace_existing:
+                    skipped.append(
+                        {"employee_id": employee_id, "reason": "Already has an active structure"}
+                    )
+                    continue
+                # Deactivate the old structure first (flush) so the single-active
+                # partial unique index never sees two active rows at once.
+                existing.is_active = False
+                await db.flush()
+
+            struct = SalaryStructure(
+                company_id=company_id,
+                employee_id=employee_id,
+                template_id=template.id,
+                ctc=Decimal(str(a["ctc"])),
+                currency=template.currency,
+                pay_frequency=template.pay_frequency,
+                effective_from=a["effective_from"],
+                components=template.components or [],
+                default_deductions=template.default_deductions or [],
+                lop_days=Decimal("0"),
+                is_active=True,
+                pf_enabled=template.pf_enabled,
+                pf_cap_at_ceiling=template.pf_cap_at_ceiling,
+                pf_wage_codes=template.pf_wage_codes,
+                esi_enabled=template.esi_enabled,
+                pt_enabled=template.pt_enabled,
+                tds_enabled=template.tds_enabled,
+            )
+            db.add(struct)
+            await db.flush()
+            created.append(struct.id)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return {"created": created, "skipped": skipped}
 
 
 async def _load_cycle(

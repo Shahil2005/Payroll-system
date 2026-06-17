@@ -22,7 +22,11 @@ class MoneyLine(BaseModel):
 
     type="fixed"   -> requires `amount` (monthly absolute value)
     type="percent" -> requires `percent`; `percent_of` references another line's
-                      code, or is omitted to mean "of gross".
+                      code, the reserved code "CTC" (per-period cost-to-company),
+                      or is omitted to mean "of gross".
+    type="balance" -> no amount/percent; resolves to whatever CTC is left after
+                      the other earnings (period_CTC - sum(others)). Earnings
+                      only — keeps a CTC-driven template summing to exactly CTC.
     """
 
     code: str = Field(..., min_length=1, max_length=64)
@@ -38,6 +42,7 @@ class MoneyLine(BaseModel):
             raise ValueError("fixed line requires 'amount'")
         if self.type == LineType.PERCENT and self.percent is None:
             raise ValueError("percent line requires 'percent'")
+        # BALANCE needs neither amount nor percent — it's derived from CTC.
         return self
 
 
@@ -99,6 +104,7 @@ class SalaryStructureOut(SalaryStructureBase):
     id: uuid.UUID
     company_id: uuid.UUID
     employee_id: uuid.UUID
+    template_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
@@ -113,6 +119,8 @@ class StructurePreviewIn(BaseModel):
     pull the employee's state (PT) and IT declaration (TDS)."""
 
     employee_id: uuid.UUID | None = None
+    ctc: Decimal = Field(default=Decimal("0"), ge=0, description="Annual CTC (drives %-of-CTC and balance lines)")
+    pay_frequency: PayFrequency = Field(default=PayFrequency.MONTHLY)
     components: list[MoneyLine] = Field(default_factory=list)
     default_deductions: list[MoneyLine] = Field(default_factory=list)
     lop_days: Decimal = Field(default=Decimal("0"), ge=0)
@@ -134,6 +142,79 @@ class StructurePreviewOut(BaseModel):
     employer_contributions: list[ResolvedLine] = Field(default_factory=list)
     employer_total: Decimal = Decimal("0.00")
     statutory: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Salary templates (reusable, CTC-driven; apply -> per-employee structures)
+# ---------------------------------------------------------------------------
+class SkippedEmployee(BaseModel):
+    employee_id: uuid.UUID
+    reason: str
+
+
+class SalaryTemplateBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    currency: str = Field(default="INR", max_length=8)
+    pay_frequency: PayFrequency = Field(default=PayFrequency.MONTHLY)
+    components: list[MoneyLine]
+    default_deductions: list[MoneyLine] = Field(default_factory=list)
+    pf_enabled: bool = False
+    pf_cap_at_ceiling: bool = True
+    pf_wage_codes: list[str] | None = None
+    esi_enabled: bool = False
+    pt_enabled: bool = False
+    tds_enabled: bool = False
+
+
+class SalaryTemplateCreate(SalaryTemplateBase):
+    pass
+
+
+class SalaryTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    currency: str | None = Field(default=None, max_length=8)
+    pay_frequency: PayFrequency | None = None
+    components: list[MoneyLine] | None = None
+    default_deductions: list[MoneyLine] | None = None
+    pf_enabled: bool | None = None
+    pf_cap_at_ceiling: bool | None = None
+    pf_wage_codes: list[str] | None = None
+    esi_enabled: bool | None = None
+    pt_enabled: bool | None = None
+    tds_enabled: bool | None = None
+
+
+class SalaryTemplateOut(SalaryTemplateBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    company_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
+
+
+class TemplateAssignment(BaseModel):
+    """One employee to receive a structure generated from the template."""
+
+    employee_id: uuid.UUID
+    ctc: Decimal = Field(..., gt=0, description="Annual CTC for this employee")
+    effective_from: date
+
+
+class TemplateApplyIn(BaseModel):
+    assignments: list[TemplateAssignment] = Field(..., min_length=1)
+    # When an employee already has an active structure: replace it (deactivate
+    # the old one) or skip them. Default replace — re-applying a template is the
+    # common 'roll out an updated package' action.
+    replace_existing: bool = True
+
+
+class TemplateApplyResult(BaseModel):
+    created: list[uuid.UUID] = Field(default_factory=list)   # new structure ids
+    skipped: list[SkippedEmployee] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +317,6 @@ class AdjustmentOut(BaseModel):
 # ---------------------------------------------------------------------------
 # Run result
 # ---------------------------------------------------------------------------
-class SkippedEmployee(BaseModel):
-    employee_id: uuid.UUID
-    reason: str
-
-
 class RunResult(BaseModel):
     created: int
     updated: int

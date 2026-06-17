@@ -6,7 +6,12 @@ import { clearSession, getToken, type AuthUser } from "@/utils/auth";
 const API_ROOT =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export type LineType = "fixed" | "percent";
+// "balance" earning absorbs the CTC remainder (period CTC - sum of other
+// earnings); percent lines may target the reserved code "CTC".
+export type LineType = "fixed" | "percent" | "balance";
+
+/** Reserved component code that resolves to per-period cost-to-company. */
+export const CTC_CODE = "CTC";
 
 export interface MoneyLine {
   code: string;
@@ -47,6 +52,38 @@ export interface SalaryStructure {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+}
+
+/** Reusable, CTC-driven salary template (no employee / CTC of its own). */
+export interface SalaryTemplate {
+  id: string;
+  company_id: string;
+  name: string;
+  description: string | null;
+  currency: string;
+  pay_frequency: PayFrequency;
+  components: MoneyLine[];
+  default_deductions: MoneyLine[];
+  pf_enabled: boolean;
+  pf_cap_at_ceiling: boolean;
+  pf_wage_codes: string[] | null;
+  esi_enabled: boolean;
+  pt_enabled: boolean;
+  tds_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface TemplateAssignment {
+  employee_id: string;
+  ctc: number;
+  effective_from: string;
+}
+
+export interface TemplateApplyResult {
+  created: string[];
+  skipped: SkippedEmployee[];
 }
 
 export interface CycleTotals {
@@ -318,6 +355,20 @@ export const payrollApi = {
     apiClient.put<SalaryStructure>(`${P}/structures/${id}`, body),
   deleteStructure: (id: string) => apiClient.del<SalaryStructure>(`${P}/structures/${id}`),
 
+  // Salary templates (reusable, CTC-driven; apply -> per-employee structures)
+  listTemplates: () => apiClient.get<SalaryTemplate[]>(`${P}/templates`),
+  getTemplate: (id: string) => apiClient.get<SalaryTemplate>(`${P}/templates/${id}`),
+  createTemplate: (body: Partial<SalaryTemplate>) =>
+    apiClient.post<SalaryTemplate>(`${P}/templates`, body),
+  updateTemplate: (id: string, body: Partial<SalaryTemplate>) =>
+    apiClient.put<SalaryTemplate>(`${P}/templates/${id}`, body),
+  deleteTemplate: (id: string) => apiClient.del<SalaryTemplate>(`${P}/templates/${id}`),
+  applyTemplate: (id: string, assignments: TemplateAssignment[], replaceExisting = true) =>
+    apiClient.post<TemplateApplyResult>(`${P}/templates/${id}/apply`, {
+      assignments,
+      replace_existing: replaceExisting,
+    }),
+
   // Cycles
   listCycles: () => apiClient.get<PayrollCycle[]>(`${P}/cycles`),
   getCycle: (id: string) => apiClient.get<PayrollCycle>(`${P}/cycles/${id}`),
@@ -562,6 +613,8 @@ export interface SalaryEstimate {
 /** Draft sent to the server-side preview endpoint (no persistence). */
 export interface StructurePreviewIn {
   employee_id?: string | null;
+  ctc?: number;
+  pay_frequency?: PayFrequency;
   components: MoneyLine[];
   default_deductions: MoneyLine[];
   lop_days: number;
@@ -594,21 +647,42 @@ export function estimateSalary(
   components: MoneyLine[],
   deductions: MoneyLine[],
   lopDays = 0,
-  workingDays = WORKING_DAYS
+  workingDays = WORKING_DAYS,
+  ctc = 0,
+  payFrequency: PayFrequency = "MONTHLY"
 ): SalaryEstimate {
   const lop = Math.max(0, Math.min(Number(lopDays) || 0, workingDays));
   const multiplier = lop > 0 ? (workingDays - lop) / workingDays : 1;
 
-  // Pass 1: resolve earnings on the raw (un-prorated) basis.
-  const rawByCode: Record<string, number> = {};
+  // Per-period CTC lets %-of-CTC and "balance" lines stay CTC-driven (mirrors
+  // the backend: monthly = CTC/12, weekly = CTC/52).
+  const periodCtc = round2((Number(ctc) || 0) / (payFrequency === "WEEKLY" ? 52 : 12));
+
+  // Pass 1: resolve earnings on the raw (un-prorated) basis. "CTC" is a
+  // reference, not an earning; balance lines are deferred to a second pass.
+  const rawByCode: Record<string, number> = { [CTC_CODE]: periodCtc };
   let rawGross = 0;
   const rawLines: { code: string; label: string; amount: number }[] = [];
+  const balanceLines: MoneyLine[] = [];
   for (const line of components || []) {
     if (!line.code?.trim()) continue;
+    if (line.type === "balance") {
+      balanceLines.push(line);
+      continue;
+    }
     const amt = round2(resolveOne(line, rawByCode, rawGross));
     rawByCode[line.code] = amt;
     rawGross = round2(rawGross + amt);
     rawLines.push({ code: line.code, label: line.label || line.code, amount: amt });
+  }
+  if (balanceLines.length) {
+    const remainder = periodCtc - rawGross;
+    const share = remainder > 0 ? round2(remainder / balanceLines.length) : 0;
+    for (const line of balanceLines) {
+      rawByCode[line.code] = share;
+      rawGross = round2(rawGross + share);
+      rawLines.push({ code: line.code, label: line.label || line.code, amount: share });
+    }
   }
 
   // Apply LOP proration uniformly to each earning line.
@@ -621,7 +695,7 @@ export function estimateSalary(
     gross = round2(gross + amt);
     earnings.push({ code, label, amount: amt });
   }
-  const dedRef = { ...byCode };
+  const dedRef: Record<string, number> = { [CTC_CODE]: periodCtc, ...byCode };
   let totalDeductions = 0;
   const ded: ResolvedLine[] = [];
   for (const line of deductions || []) {

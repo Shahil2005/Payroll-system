@@ -9,6 +9,7 @@ import { permissionForRoute } from "@/utils/auth";
 const NAV: { label: string; icon: string; path: string }[] = [
   { label: "Dashboard", icon: "dashboard", path: "/enterprise/dashboard" },
   { label: "Payroll", icon: "payments", path: "/enterprise/payroll" },
+  { label: "Salary Templates", icon: "content_copy", path: "/enterprise/payroll/templates" },
   { label: "Salary Structures", icon: "tune", path: "/enterprise/payroll/structures" },
   { label: "Employees", icon: "groups", path: "/enterprise/employees" },
   { label: "Taxes & Forms", icon: "request_quote", path: "/enterprise/taxes" },
@@ -48,7 +49,10 @@ export default function EnterpriseLayout({
 
   const isActive = (path: string) =>
     path === "/enterprise/payroll"
-      ? pathname === path || (pathname.startsWith(path) && !pathname.includes("/structures"))
+      ? pathname === path ||
+        (pathname.startsWith(path) &&
+          !pathname.includes("/structures") &&
+          !pathname.includes("/templates"))
       : pathname.startsWith(path);
 
   const initials =

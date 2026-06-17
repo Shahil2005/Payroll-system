@@ -35,6 +35,18 @@ class PayslipStatus(str, Enum):
 class LineType(str, Enum):
     FIXED = "fixed"
     PERCENT = "percent"
+    # A "balancing" earning that absorbs whatever CTC is left after the other
+    # lines are resolved (i.e. period_CTC - sum(other earnings)). Lets a salary
+    # template stay CTC-driven: change the CTC and every line rescales while the
+    # balance line keeps the package summing to exactly the CTC. See
+    # compute_payslip. Percent/fixed lines can also target the reserved code
+    # "CTC" via `percent_of` to scale against the per-period cost-to-company.
+    BALANCE = "balance"
+
+
+# Reserved component code that `percent_of` / templates resolve to the
+# per-period cost-to-company (annual CTC / 12 monthly, / 52 weekly).
+CTC_CODE = "CTC"
 
 
 class PayFrequency(str, Enum):

@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Croar Payroll — Application Overview</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 16mm 16mm; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: #1f2733; font-size: 10.5pt; line-height: 1.5; margin: 0;
+  }
+  h1, h2, h3 { color: #0f2747; line-height: 1.25; }
+  h2 {
+    font-size: 15pt; margin: 26px 0 10px; padding-bottom: 6px;
+    border-bottom: 2px solid #2563eb;
+  }
+  h3 { font-size: 11.5pt; margin: 16px 0 6px; color: #1d4ed8; }
+  p { margin: 6px 0; }
+  ul { margin: 6px 0 6px 0; padding-left: 20px; }
+  li { margin: 3px 0; }
+  code {
+    background: #eef2f7; padding: 1px 5px; border-radius: 4px;
+    font-family: "Consolas", "Courier New", monospace; font-size: 9pt; color: #b8336a;
+  }
+  .section { page-break-inside: avoid; }
+
+  /* Cover */
+  .cover {
+    height: 247mm; display: flex; flex-direction: column;
+    justify-content: center; page-break-after: always;
+    background: linear-gradient(135deg, #0f2747 0%, #1e3a8a 55%, #2563eb 100%);
+    color: #fff; margin: -18mm -16mm 0 -16mm; padding: 0 22mm;
+  }
+  .cover .kicker { letter-spacing: 3px; text-transform: uppercase; font-size: 11pt; color: #9dc1ff; }
+  .cover h1 { color: #fff; font-size: 40pt; margin: 8px 0 4px; }
+  .cover .sub { font-size: 14pt; color: #d6e4ff; max-width: 130mm; }
+  .cover .meta { margin-top: 40px; font-size: 10.5pt; color: #bcd2ff; }
+  .cover .meta b { color: #fff; }
+  .cover .rule { width: 70px; height: 5px; background: #60a5fa; margin: 18px 0; border-radius: 3px; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 9.3pt; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+  th { background: #f1f5f9; color: #0f2747; font-weight: 600; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  td.c, th.c { text-align: center; }
+
+  /* Callout cards */
+  .grid { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+  .card {
+    flex: 1 1 45%; border: 1px solid #dbe4f0; border-left: 4px solid #2563eb;
+    border-radius: 6px; padding: 10px 12px; background: #fbfdff; page-break-inside: avoid;
+  }
+  .card h4 { margin: 0 0 4px; color: #0f2747; font-size: 10.5pt; }
+  .card p { margin: 0; font-size: 9.3pt; color: #45525f; }
+
+  .badge {
+    display: inline-block; background: #dcfce7; color: #166534;
+    border-radius: 10px; padding: 1px 8px; font-size: 8pt; font-weight: 600;
+  }
+  .badge.todo { background: #fef3c7; color: #92400e; }
+  .badge.blocked { background: #fee2e2; color: #991b1b; }
+
+  .flow {
+    font-family: "Consolas", monospace; font-size: 9pt; background: #0f2747;
+    color: #cfe0ff; padding: 12px 14px; border-radius: 6px; white-space: pre; overflow-x: auto;
+    page-break-inside: avoid;
+  }
+  .note {
+    background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;
+    padding: 8px 12px; font-size: 9.3pt; margin: 10px 0;
+  }
+  .foot { margin-top: 30px; padding-top: 10px; border-top: 1px solid #e2e8f0;
+    font-size: 8.5pt; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+
+<!-- ===== COVER ===== -->
+<div class="cover">
+  <div class="kicker">Application Overview</div>
+  <h1>Croar Payroll</h1>
+  <div class="rule"></div>
+  <div class="sub">A multi-tenant payroll management platform — define salary structures, run payroll cycles, and issue payslips through a guarded, permission-controlled lifecycle.</div>
+  <div class="meta">
+    <p><b>Stack:</b> FastAPI (async) &nbsp;·&nbsp; Next.js + Tailwind &nbsp;·&nbsp; PostgreSQL</p>
+    <p><b>Date:</b> 17 June 2026</p>
+  </div>
+</div>
+
+<!-- ===== 1. SUMMARY ===== -->
+<div class="section">
+<h2>1. Executive Summary</h2>
+<p>Croar Payroll is a decoupled single-page application backed by a JSON API. The Next.js client handles presentation; the FastAPI backend owns every business rule, calculation, and persistence concern. The system is <b>multi-tenant</b> — every record is scoped to a company — and protected by <b>JWT authentication with role-based access control</b>.</p>
+<p>Its correctness-critical core is mature: array-based salary structures, a deterministic <code>Decimal</code> calculation engine, statutory snapshots, an audited approval workflow, and payslips that are released only when a cycle is fully paid. Recent work has extended it toward a managed-service feature set: per-run adjustments, CSV/PDF reports, an audit trail, an income-tax (TDS) engine, and an org-settings module.</p>
+
+<div class="grid">
+  <div class="card"><h4>Multi-tenant by design</h4><p>Every query is scoped to the signed-in user's company. Tenants only ever see their own data.</p></div>
+  <div class="card"><h4>Secure by default</h4><p>JWT auth + fine-grained <code>payroll:*</code> permissions enforced on the API and mirrored in the UI.</p></div>
+  <div class="card"><h4>Auditable</h4><p>Append-only audit log records who did what and when; activity is browsable in-app.</p></div>
+  <div class="card"><h4>Correct money math</h4><p>Pure <code>Decimal</code> engine, rounded per line (ROUND_HALF_UP) to avoid cent drift.</p></div>
+</div>
+</div>
+
+<!-- ===== 2. TECH STACK ===== -->
+<div class="section">
+<h2>2. Technology Stack</h2>
+<table>
+  <tr><th>Layer</th><th>Technology</th></tr>
+  <tr><td>Backend</td><td>FastAPI 0.115, Python 3.10+, async SQLAlchemy 2.0, Pydantic v2</td></tr>
+  <tr><td>Database</td><td>PostgreSQL (asyncpg driver), Alembic migrations</td></tr>
+  <tr><td>Auth</td><td>PyJWT bearer tokens, password hashing, RBAC</td></tr>
+  <tr><td>Frontend</td><td>Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4</td></tr>
+  <tr><td>Async / jobs</td><td>Celery + Redis (scaffolded)</td></tr>
+  <tr><td>Serving</td><td>Uvicorn / Gunicorn</td></tr>
+  <tr><td>Tooling</td><td>pytest + coverage, ruff, mypy, pre-commit, Docker Compose</td></tr>
+</table>
+</div>
+
+<!-- ===== 3. ARCHITECTURE ===== -->
+<div class="section">
+<h2>3. Architecture</h2>
+<p>A decoupled SPA + API. The Next.js client talks to FastAPI over JSON; the backend is layered so each tier has a single responsibility.</p>
+<div class="flow">┌─────────────────────────────┐         ┌──────────────────────────────────────┐
+│        Next.js (3000)        │  HTTPS  │             FastAPI (8000)             │
+│  App Router pages            │ ◄─────► │  Routers → Services → Models           │
+│  AuthProvider (JWT in store) │  JSON   │  JWT auth + RBAC dependencies          │
+│  utils/api.ts  apiClient     │         │  async SQLAlchemy / asyncpg            │
+└─────────────────────────────┘         └───────────────────┬──────────────────┘
+                                              ┌──────────────┴───────────────┐
+                                              │  PostgreSQL   │   Redis (jobs) │
+                                              └───────────────────────────────┘</div>
+<h3>Backend layering</h3>
+<ul>
+  <li><b>Routers</b> stay thin — validate input, declare the required permission, delegate.</li>
+  <li><b>Dependencies</b> handle <code>get_current_user</code>, company scoping, and <code>require_permission</code>.</li>
+  <li><b>Services</b> hold testable business logic — e.g. <code>compute_payslip</code> is pure math with no DB dependency.</li>
+  <li><b>Models</b> are SQLAlchemy ORM with constraints and soft-delete columns.</li>
+</ul>
+</div>
+
+<!-- ===== 4. DATA MODEL ===== -->
+<div class="section">
+<h2>4. Data Model</h2>
+<div class="flow">companies ──1───*── employees ──1───*── salary_structures
+    │                   │                      (1 active per employee)
+    │                   └───*── payslips ──*──1── payroll_cycles
+    └───1───*── users   (login identities; role drives permissions)</div>
+<table>
+  <tr><th>Table</th><th>Purpose</th></tr>
+  <tr><td><code>companies</code></td><td>Tenant root; every row carries <code>company_id</code>.</td></tr>
+  <tr><td><code>users</code></td><td>Login identities with a role (ADMIN / HR / VIEWER).</td></tr>
+  <tr><td><code>employees</code></td><td>People to pay; soft-deletable; unique email per company.</td></tr>
+  <tr><td><code>salary_structures</code></td><td>Earnings + deductions money lines, CTC, <code>lop_days</code>; one active each.</td></tr>
+  <tr><td><code>payroll_cycles</code></td><td>A pay period with <code>status</code> and rolled-up totals.</td></tr>
+  <tr><td><code>payslips</code></td><td>One per employee per cycle; immutable snapshot of resolved lines.</td></tr>
+</table>
+<div class="note"><b>Conventions:</b> UUID primary keys · audit columns (<code>created_at</code>, <code>updated_at</code>, <code>deleted_at</code>) on every table · soft delete via <code>deleted_at IS NULL</code> · statuses stored as strings, validated through Python enums.</div>
+</div>
+
+<!-- ===== 5. LIFECYCLE ===== -->
+<div class="section">
+<h2>5. Payroll Lifecycle</h2>
+<p>A cycle moves through a guarded state machine. Each transition requires a specific permission and is rejected (<code>409</code>) from any other state.</p>
+<div class="flow">  run (payroll:run)      approve (payroll:approve)    mark-paid (payroll:pay)
+┌───────┐ ──────────► ┌────────────┐ ──────────► ┌──────────┐ ──────────► ┌──────┐
+│ DRAFT │             │ PROCESSING │             │ APPROVED │             │ PAID │
+└───────┘ ◄─ re-run ─ └────────────┘             └──────────┘             └──────┘
+    │                       │                                                 ▲
+    └──── cancel (payroll:manage) ────► ┌───────────┐        payslips released│
+                                        │ CANCELLED │         (only at PAID) ──┘
+                                        └───────────┘</div>
+<ul>
+  <li><b>Run</b> is allowed on DRAFT or PROCESSING (re-run recalculates idempotently in place).</li>
+  <li><b>Cancel</b> is allowed from any non-PAID state.</li>
+  <li>A <b>PAID cycle is terminal</b> — it cannot be re-run, cancelled, or deleted.</li>
+  <li><b>Payslips are visible only once the cycle is PAID.</b></li>
+</ul>
+</div>
+
+<!-- ===== 6. RBAC ===== -->
+<div class="section">
+<h2>6. Roles &amp; Permissions</h2>
+<p>Permissions are fine-grained <code>payroll:*</code> capabilities; roles bundle them. The API enforces them via a <code>require_permission(...)</code> dependency (403 on failure); the frontend hides disallowed nav and blocks direct navigation.</p>
+<table>
+  <tr><th>Permission</th><th>Meaning</th><th class="c">ADMIN</th><th class="c">HR</th><th class="c">VIEWER</th></tr>
+  <tr><td><code>payroll:read</code></td><td>View cycles, structures, payslips, staff</td><td class="c">✓</td><td class="c">✓</td><td class="c">✓</td></tr>
+  <tr><td><code>payroll:configure</code></td><td>Create/edit structures, employees, cycles</td><td class="c">✓</td><td class="c">✓</td><td class="c">—</td></tr>
+  <tr><td><code>payroll:run</code></td><td>Run / recalculate a cycle</td><td class="c">✓</td><td class="c">✓</td><td class="c">—</td></tr>
+  <tr><td><code>payroll:approve</code></td><td>Approve a processed cycle</td><td class="c">✓</td><td class="c">✓</td><td class="c">—</td></tr>
+  <tr><td><code>payroll:pay</code></td><td>Mark a cycle paid</td><td class="c">✓</td><td class="c">✓</td><td class="c">—</td></tr>
+  <tr><td><code>payroll:manage</code></td><td>Cancel / delete cycles</td><td class="c">✓</td><td class="c">✓</td><td class="c">—</td></tr>
+  <tr><td><code>users:manage</code></td><td>Create / list users</td><td class="c">✓</td><td class="c">—</td><td class="c">—</td></tr>
+</table>
+</div>
+
+<!-- ===== 7. CALCULATION ===== -->
+<div class="section">
+<h2>7. Payslip Calculation</h2>
+<p><code>compute_payslip</code> (in <code>app/services/payroll_service.py</code>) is pure, deterministic <code>Decimal</code> math:</p>
+<ul>
+  <li><b>Resolve earnings</b> — each line is <code>fixed</code>, a <code>percent</code> of another line's code, or a percent of gross-so-far when <code>percent_of</code> is omitted.</li>
+  <li><b>Apply LOP proration</b> — <code>multiplier = (working_days − lop_days) / working_days</code> on a fixed 30-day basis; earnings are pro-rated.</li>
+  <li><b>Resolve deductions</b> — same line rules, evaluated against pro-rated earnings; statutory + estimated TDS where enabled.</li>
+  <li><b>Net pay</b> = gross − total deductions.</li>
+</ul>
+<div class="note">Every resolved line is rounded to 2 dp (ROUND_HALF_UP) before summing to avoid cent drift. LOP greater than the working-days basis reports that employee in the run's <code>skipped</code> list rather than failing the whole run.</div>
+</div>
+
+<!-- ===== 8. FEATURE HIGHLIGHTS ===== -->
+<div class="section">
+<h2>8. Feature Highlights</h2>
+<div class="grid">
+  <div class="card"><h4>Employees</h4><p>Full CRUD, unique email per company, soft delete that preserves payslip history and deactivates structures.</p></div>
+  <div class="card"><h4>Salary Structures</h4><p>One active per employee, array-based earnings/deductions, LOP, live monthly estimate while editing (server-computed).</p></div>
+  <div class="card"><h4>Payroll Cycles</h4><p>Idempotent runs, employees without a structure surfaced in a <code>skipped</code> list, per-cycle roll-up totals.</p></div>
+  <div class="card"><h4>Per-run Adjustments</h4><p>One-time bonus / arrears / deductions applied on a cycle, editable only in DRAFT/PROCESSING.</p></div>
+  <div class="card"><h4>Reports &amp; Audit</h4><p>CSV + PDF salary-register and payroll-summary exports; append-only audit trail with an in-app activity page.</p></div>
+  <div class="card"><h4>Taxes &amp; TDS</h4><p>Employee IT declarations (both regimes), an opt-in income-tax estimator, and TDS challan records.</p></div>
+  <div class="card"><h4>Org Settings</h4><p>Editable organisation profile (legal name, PAN/TAN, address) — read for all, write for admins.</p></div>
+  <div class="card"><h4>Dashboard</h4><p>Company-wide overview: coverage, structure counts, cycle status, disbursed vs. pending — one server call.</p></div>
+</div>
+</div>
+
+<!-- ===== 9. API ===== -->
+<div class="section">
+<h2>9. Selected API Surface</h2>
+<p>Base URL <code>http://localhost:8000</code> · interactive docs at <code>/api/docs</code>. All <code>/api/v1/...</code> endpoints require a bearer token (except <code>auth/login</code>).</p>
+<table>
+  <tr><th>Method</th><th>Path</th><th>Permission</th><th>Description</th></tr>
+  <tr><td>POST</td><td><code>/auth/login</code></td><td>public</td><td>Email/password → JWT + user</td></tr>
+  <tr><td>GET</td><td><code>/payroll/dashboard</code></td><td>payroll:read</td><td>Company overview</td></tr>
+  <tr><td>POST</td><td><code>/payroll/structures</code></td><td>payroll:configure</td><td>Create salary structure</td></tr>
+  <tr><td>POST</td><td><code>/payroll/cycles/{id}/run</code></td><td>payroll:run</td><td>Run / recalculate cycle</td></tr>
+  <tr><td>POST</td><td><code>/payroll/cycles/{id}/approve</code></td><td>payroll:approve</td><td>PROCESSING → APPROVED</td></tr>
+  <tr><td>POST</td><td><code>/payroll/cycles/{id}/mark-paid</code></td><td>payroll:pay</td><td>APPROVED → PAID</td></tr>
+  <tr><td>GET</td><td><code>/payroll/cycles/{id}/payslips</code></td><td>payroll:read</td><td>List payslips (PAID only)</td></tr>
+</table>
+</div>
+
+<!-- ===== 10. ROADMAP ===== -->
+<div class="section">
+<h2>10. Roadmap</h2>
+<p>Croar's core is benchmarked against RazorpayX and Zoho Payroll. The correctness-critical engine is complete; remaining work is largely the managed-service layer.</p>
+<h3>Delivered <span class="badge">DONE</span></h3>
+<ul>
+  <li>Per-run adjustments / off-cycle bonus runs</li>
+  <li>Reports &amp; registers (CSV / PDF)</li>
+  <li>Audit / activity log</li>
+  <li>TDS / income-tax estimator (both regimes, opt-in)</li>
+  <li>Organisation settings &amp; tax forms module</li>
+</ul>
+<h3>Buildable next <span class="badge todo">PLANNED</span></h3>
+<ul>
+  <li>Form 16 / 24Q generation, attendance→LOP automation &amp; leave</li>
+  <li>Employee self-service portal (new EMPLOYEE role scoped to own data)</li>
+  <li>Loans/advances, flexible benefits, reimbursements, salary revision &amp; arrears, full &amp; final settlement</li>
+  <li>Departments/designations, multi-level approvals, notifications</li>
+</ul>
+<h3>Needs external integration <span class="badge blocked">BLOCKED</span></h3>
+<ul>
+  <li>Real bank/UPI disbursement (payout API)</li>
+  <li>Automated government filing portals (challan/return files can still be generated offline)</li>
+  <li>Live attendance check-in/out &amp; HRMS/accounting connectors</li>
+</ul>
+</div>
+
+<div class="foot">Croar Payroll — Application Overview · Generated 17 June 2026 · Confidential, for internal review</div>
+
+</body>
+</html>

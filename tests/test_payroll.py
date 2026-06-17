@@ -71,6 +71,7 @@ def _reset_db() -> None:
     cur.execute("TRUNCATE TABLE employee_tax_profiles CASCADE;")
     cur.execute("TRUNCATE TABLE payslips CASCADE;")
     cur.execute("TRUNCATE TABLE salary_structures CASCADE;")
+    cur.execute("TRUNCATE TABLE salary_templates CASCADE;")
     cur.execute("TRUNCATE TABLE payroll_cycles CASCADE;")
     cur.execute("TRUNCATE TABLE employees CASCADE;")
     # Ensure the default scoping company exists.
@@ -147,6 +148,7 @@ def db_setup() -> Generator[None, None, None]:
     cur.execute("TRUNCATE TABLE employee_tax_profiles CASCADE;")
     cur.execute("TRUNCATE TABLE payslips CASCADE;")
     cur.execute("TRUNCATE TABLE salary_structures CASCADE;")
+    cur.execute("TRUNCATE TABLE salary_templates CASCADE;")
     cur.execute("TRUNCATE TABLE payroll_cycles CASCADE;")
     cur.execute("TRUNCATE TABLE employees CASCADE;")
     cur.close()
@@ -259,6 +261,176 @@ def test_compute_invalid_lop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests — CTC-driven (dynamic) components: percent-of-CTC + balance line
+# ---------------------------------------------------------------------------
+def _ctc_driven_components() -> list[dict[str, Any]]:
+    """A CTC-driven template: BASIC = 40% of CTC, HRA = 50% of BASIC, and a
+    SPECIAL 'balance' line that absorbs the remainder of the CTC."""
+    return [
+        {"code": "BASIC", "label": "Basic", "type": "percent", "percent": 40, "percent_of": "CTC"},
+        {"code": "HRA", "label": "HRA", "type": "percent", "percent": 50, "percent_of": "BASIC"},
+        {"code": "SPECIAL", "label": "Special Allowance", "type": "balance"},
+    ]
+
+
+def test_compute_percent_of_ctc() -> None:
+    """percent_of 'CTC' resolves against per-period CTC (annual / 12)."""
+    struct = _make_struct(
+        ctc=Decimal("1200000.00"),  # -> 100000 / month
+        components=[{"code": "BASIC", "label": "Basic", "type": "percent", "percent": 40, "percent_of": "CTC"}],
+        default_deductions=[],
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    assert res["gross_earnings"] == Decimal("40000.00")  # 40% of 100000
+
+
+def test_compute_balance_line_sums_to_ctc() -> None:
+    """BASIC 40000 + HRA 20000 + SPECIAL (balance) -> gross == period CTC."""
+    struct = _make_struct(
+        ctc=Decimal("1200000.00"),  # 100000 / month
+        components=_ctc_driven_components(),
+        default_deductions=[],
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    assert res["gross_earnings"] == Decimal("100000.00")
+    special = next(e for e in res["earnings"] if e["code"] == "SPECIAL")
+    assert special["amount"] == 40000.00  # 100000 - 40000 - 20000
+
+
+def test_compute_balance_scales_with_ctc() -> None:
+    """The same template applied at a higher CTC scales every line — the
+    'dynamic' property: components are rules, not frozen amounts."""
+    res = compute_payslip(
+        _make_struct(ctc=Decimal("2400000.00"), components=_ctc_driven_components(), default_deductions=[]),
+        Decimal("0"),
+        Decimal("30"),
+    )
+    assert res["gross_earnings"] == Decimal("200000.00")
+    amounts = {e["code"]: e["amount"] for e in res["earnings"]}
+    assert amounts == {"BASIC": 80000.00, "HRA": 40000.00, "SPECIAL": 80000.00}
+
+
+def test_compute_balance_never_negative() -> None:
+    """If fixed lines already exceed CTC, the balance line floors at 0."""
+    struct = _make_struct(
+        ctc=Decimal("600000.00"),  # 50000 / month
+        components=[
+            {"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 60000},
+            {"code": "SPECIAL", "label": "Special", "type": "balance"},
+        ],
+        default_deductions=[],
+    )
+    res = compute_payslip(struct, Decimal("0"), Decimal("30"))
+    special = next(e for e in res["earnings"] if e["code"] == "SPECIAL")
+    assert special["amount"] == 0.00
+    assert res["gross_earnings"] == Decimal("60000.00")
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — salary templates (reusable, CTC-driven)
+# ---------------------------------------------------------------------------
+_TEMPLATE_BODY = {
+    "name": "Engineer L1",
+    "description": "Standard engineering package",
+    "components": [
+        {"code": "BASIC", "label": "Basic", "type": "percent", "percent": 40, "percent_of": "CTC"},
+        {"code": "HRA", "label": "HRA", "type": "percent", "percent": 50, "percent_of": "BASIC"},
+        {"code": "SPECIAL", "label": "Special Allowance", "type": "balance"},
+    ],
+    "default_deductions": [],
+}
+
+
+def test_template_crud_and_unique_name() -> None:
+    with authed_client() as c:
+        created = c.post("/api/v1/enterprise/payroll/templates", json=_TEMPLATE_BODY)
+        assert created.status_code == status.HTTP_201_CREATED, created.text
+        tid = created.json()["id"]
+
+        # Duplicate name -> 409
+        dup = c.post("/api/v1/enterprise/payroll/templates", json=_TEMPLATE_BODY)
+        assert dup.status_code == status.HTTP_409_CONFLICT
+
+        listed = c.get("/api/v1/enterprise/payroll/templates")
+        assert listed.status_code == status.HTTP_200_OK
+        assert len(listed.json()) == 1
+
+        # Update + soft delete frees the name.
+        upd = c.put(
+            f"/api/v1/enterprise/payroll/templates/{tid}",
+            json={"description": "Updated"},
+        )
+        assert upd.status_code == status.HTTP_200_OK
+        assert upd.json()["description"] == "Updated"
+
+        assert c.delete(f"/api/v1/enterprise/payroll/templates/{tid}").status_code == status.HTTP_200_OK
+        assert len(c.get("/api/v1/enterprise/payroll/templates").json()) == 0
+        # Name is reusable after delete.
+        assert c.post("/api/v1/enterprise/payroll/templates", json=_TEMPLATE_BODY).status_code == status.HTTP_201_CREATED
+
+
+def test_template_apply_scales_per_employee_ctc() -> None:
+    """Applying one template to two employees at different CTCs yields structures
+    whose amounts scale to each CTC, then a run computes the scaled pay."""
+    with authed_client() as c:
+        tid = c.post("/api/v1/enterprise/payroll/templates", json=_TEMPLATE_BODY).json()["id"]
+
+        applied = c.post(
+            f"/api/v1/enterprise/payroll/templates/{tid}/apply",
+            json={
+                "assignments": [
+                    {"employee_id": EMP1, "ctc": 1200000, "effective_from": "2026-06-01"},
+                    {"employee_id": EMP2, "ctc": 2400000, "effective_from": "2026-06-01"},
+                ]
+            },
+        )
+        assert applied.status_code == status.HTTP_200_OK, applied.text
+        assert len(applied.json()["created"]) == 2
+        assert applied.json()["skipped"] == []
+
+        # Both employees now have a structure linked to the template at their CTC.
+        for emp, expected_ctc in ((EMP1, 1200000.0), (EMP2, 2400000.0)):
+            rows = c.get(f"/api/v1/enterprise/payroll/structures?employee_id={emp}").json()
+            assert len(rows) == 1
+            assert rows[0]["template_id"] == tid
+            assert float(rows[0]["ctc"]) == expected_ctc
+
+        # Run a cycle: EMP1 gross = 100000, EMP2 gross = 200000.
+        cid = _create_cycle(c)["id"]
+        run = c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        assert run.status_code == status.HTTP_200_OK, run.text
+        assert run.json()["created"] == 2
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+        slips = {s["employee_id"]: s for s in c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()}
+        assert float(slips[EMP1]["gross_earnings"]) == 100000.0
+        assert float(slips[EMP2]["gross_earnings"]) == 200000.0
+
+
+def test_template_apply_replace_and_skip() -> None:
+    with authed_client() as c:
+        tid = c.post("/api/v1/enterprise/payroll/templates", json=_TEMPLATE_BODY).json()["id"]
+        base = {"assignments": [{"employee_id": EMP1, "ctc": 1200000, "effective_from": "2026-06-01"}]}
+
+        first = c.post(f"/api/v1/enterprise/payroll/templates/{tid}/apply", json=base)
+        assert len(first.json()["created"]) == 1
+
+        # replace_existing=False -> skip the already-configured employee.
+        skip = c.post(
+            f"/api/v1/enterprise/payroll/templates/{tid}/apply",
+            json={**base, "replace_existing": False},
+        )
+        assert skip.json()["created"] == []
+        assert len(skip.json()["skipped"]) == 1
+
+        # Default replace -> new active structure, exactly one remains active.
+        repl = c.post(f"/api/v1/enterprise/payroll/templates/{tid}/apply", json=base)
+        assert len(repl.json()["created"]) == 1
+        active = c.get(f"/api/v1/enterprise/payroll/structures?employee_id={EMP1}").json()
+        assert sum(1 for s in active if s["is_active"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Integration tests
 # ---------------------------------------------------------------------------
 def test_payroll_lifecycle() -> None:
@@ -297,8 +469,13 @@ def test_payroll_lifecycle() -> None:
         assert got["totals"]["deductions"] == 1800.0
         assert got["totals"]["net"] == 54200.0
 
-        # Payslips stay hidden until the cycle is PAID (PROCESSING -> empty list)
-        assert c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json() == []
+        # The computed payslip summary is visible once a run generates it
+        # (PROCESSING) — names + amounts. The full individual payslip stays
+        # gated to PAID (checked below).
+        processing_slips = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()
+        assert len(processing_slips) == 1
+        assert processing_slips[0]["employee_id"] == EMP1
+        assert float(processing_slips[0]["gross_earnings"]) == 56000.0
 
         # Re-run on PROCESSING is allowed (idempotent refresh)
         rerun = c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
@@ -309,8 +486,9 @@ def test_payroll_lifecycle() -> None:
         assert approve.status_code == status.HTTP_200_OK
         assert approve.json()["status"] == PayrollCycleStatus.APPROVED
 
-        # Still hidden while APPROVED; direct payslip fetch is forbidden pre-PAID
-        assert c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json() == []
+        # Summary still listed while APPROVED, but a direct payslip fetch is
+        # forbidden pre-PAID (the full document is released only on disbursement).
+        assert len(c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()) == 1
         conn = psycopg2.connect(_DSN)
         conn.autocommit = True
         cur = conn.cursor()

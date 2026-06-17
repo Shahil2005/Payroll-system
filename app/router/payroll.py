@@ -4,12 +4,19 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.constants import DEFAULT_WORKING_DAYS, PayrollCycleStatus, Permission
 from app.core.dependencies import DBSessionDep, get_current_company_id, require_permission
 from app.models.company import Company
 from app.models.employee import Employee
-from app.models.payroll import PayrollAdjustment, PayrollCycle, Payslip, SalaryStructure
+from app.models.payroll import (
+    PayrollAdjustment,
+    PayrollCycle,
+    Payslip,
+    SalaryStructure,
+    SalaryTemplate,
+)
 from app.schema.payroll import (
     AdjustmentCreate,
     AdjustmentOut,
@@ -24,8 +31,13 @@ from app.schema.payroll import (
     SalaryStructureCreate,
     SalaryStructureOut,
     SalaryStructureUpdate,
+    SalaryTemplateCreate,
+    SalaryTemplateOut,
+    SalaryTemplateUpdate,
     StructurePreviewIn,
     StructurePreviewOut,
+    TemplateApplyIn,
+    TemplateApplyResult,
 )
 from app.services import email_service, payroll_service, pdf_service
 
@@ -117,6 +129,8 @@ async def preview_salary_structure(
     """
     draft = {
         "employee_id": payload.employee_id,
+        "ctc": payload.ctc,
+        "pay_frequency": payload.pay_frequency.value,
         "components": [c.model_dump(mode="json") for c in payload.components],
         "default_deductions": [d.model_dump(mode="json") for d in payload.default_deductions],
         "lop_days": payload.lop_days,
@@ -254,6 +268,151 @@ async def delete_salary_structure(
         await db.rollback()
         raise
     return struct
+
+
+# ---------------------------------------------------------------------------
+# Salary templates (reusable, CTC-driven; apply -> per-employee structures)
+# ---------------------------------------------------------------------------
+def _template_values(payload: SalaryTemplateCreate | SalaryTemplateUpdate) -> dict:
+    """Serialise template fields set on the payload (MoneyLines -> JSON)."""
+    data = payload.model_dump(exclude_unset=True)
+    if "pay_frequency" in data and data["pay_frequency"] is not None:
+        data["pay_frequency"] = payload.pay_frequency.value
+    for key in ("components", "default_deductions"):
+        if data.get(key) is not None:
+            data[key] = [line.model_dump(mode="json") for line in getattr(payload, key)]
+    return data
+
+
+async def _load_template(
+    db: DBSessionDep, id: uuid.UUID, company_id: uuid.UUID
+) -> SalaryTemplate:
+    template = (
+        await db.execute(
+            select(SalaryTemplate).where(
+                SalaryTemplate.id == id,
+                SalaryTemplate.company_id == company_id,
+                SalaryTemplate.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    return template
+
+
+@router.post("/templates", response_model=SalaryTemplateOut, status_code=status.HTTP_201_CREATED)
+async def create_template(
+    payload: SalaryTemplateCreate,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> SalaryTemplate:
+    template = SalaryTemplate(company_id=company_id, **_template_values(payload))
+    db.add(template)
+    try:
+        await db.commit()
+        await db.refresh(template)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A template with this name already exists.",
+        )
+    except Exception:
+        await db.rollback()
+        raise
+    return template
+
+
+@router.get("/templates", response_model=list[SalaryTemplateOut])
+async def list_templates(
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> list[SalaryTemplate]:
+    rows = (
+        await db.execute(
+            select(SalaryTemplate)
+            .where(SalaryTemplate.company_id == company_id, SalaryTemplate.deleted_at.is_(None))
+            .order_by(SalaryTemplate.created_at.desc())
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+@router.get("/templates/{id}", response_model=SalaryTemplateOut)
+async def get_template(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> SalaryTemplate:
+    return await _load_template(db, id, company_id)
+
+
+@router.put("/templates/{id}", response_model=SalaryTemplateOut)
+async def update_template(
+    id: uuid.UUID,
+    payload: SalaryTemplateUpdate,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> SalaryTemplate:
+    template = await _load_template(db, id, company_id)
+    for field, value in _template_values(payload).items():
+        setattr(template, field, value)
+    try:
+        await db.commit()
+        await db.refresh(template)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A template with this name already exists.",
+        )
+    except Exception:
+        await db.rollback()
+        raise
+    return template
+
+
+@router.delete("/templates/{id}", response_model=SalaryTemplateOut)
+async def delete_template(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> SalaryTemplate:
+    template = await _load_template(db, id, company_id)
+    template.deleted_at = datetime.utcnow()
+    try:
+        await db.commit()
+        await db.refresh(template)
+    except Exception:
+        await db.rollback()
+        raise
+    return template
+
+
+@router.post("/templates/{id}/apply", response_model=TemplateApplyResult)
+async def apply_template(
+    id: uuid.UUID,
+    payload: TemplateApplyIn,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_CONFIGURE)),
+) -> dict:
+    """Generate (or replace) salary structures for the given employees from this
+    template. Each employee's structure is stamped with their own CTC, so the
+    template's percentage rules scale per person."""
+    return await payroll_service.apply_template(
+        db,
+        company_id,
+        id,
+        [a.model_dump() for a in payload.assignments],
+        payload.replace_existing,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -505,8 +664,10 @@ async def list_cycle_payslips(
     _: object = Depends(require_permission(Permission.PAYROLL_READ)),
 ) -> list[Payslip]:
     cycle = await payroll_service._load_cycle(db, id, company_id)
-    # Payslips are only released once the cycle has been disbursed (marked PAID).
-    if cycle.status != PayrollCycleStatus.PAID:
+    # The computed payslip summary (names + amounts) is visible once a run has
+    # generated payslips — i.e. any time after DRAFT and before CANCELLED. The
+    # full individual payslip (detail/PDF) stays gated to PAID (see get_payslip).
+    if cycle.status in (PayrollCycleStatus.DRAFT, PayrollCycleStatus.CANCELLED):
         return []
     rows = (
         await db.execute(

@@ -41,7 +41,13 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
     try {
       const c = await payrollApi.getCycle(id);
       setCycle(c);
-      if (c.status === "PAID") setPayslips(await payrollApi.listCyclePayslips(id));
+      // Payslips (computed summary) are available as soon as a run generates
+      // them — i.e. any status past DRAFT. The backend gates DRAFT/CANCELLED.
+      if (c.status !== "DRAFT" && c.status !== "CANCELLED") {
+        setPayslips(await payrollApi.listCyclePayslips(id));
+      } else {
+        setPayslips([]);
+      }
       // Adjustments are editable only before approval; load them then.
       if (c.status === "DRAFT" || c.status === "PROCESSING") {
         setAdjustments(await payrollApi.listAdjustments(id));
@@ -238,14 +244,21 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
 
         {/* Right column: payslips */}
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-6 lg:col-span-2">
-          <h3 className="mb-4 font-semibold">Employee Payslips</h3>
-          {cycle.status !== "PAID" ? (
+          <div className="mb-4 flex items-baseline justify-between">
+            <h3 className="font-semibold">Employee Payslips</h3>
+            {payslips.length > 0 && (
+              <span className="text-xs text-[var(--color-muted)]">
+                {payslips.length} employee{payslips.length > 1 ? "s" : ""} calculated
+              </span>
+            )}
+          </div>
+          {cycle.status === "DRAFT" || cycle.status === "CANCELLED" ? (
             <div className="py-12 text-center text-[var(--color-muted)]">
               <span className="material-symbols-outlined mb-2 text-4xl text-[var(--color-dim)]">receipt_long</span>
               <p>
                 {cycle.status === "DRAFT"
                   ? "Run payroll to generate payslips."
-                  : "Payslips become available once the cycle is marked as paid."}
+                  : "This cycle was cancelled."}
               </p>
             </div>
           ) : payslips.length === 0 ? (
@@ -274,12 +287,21 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
                       <td className="px-3 py-3 text-right text-[var(--color-danger)]">- {inr(p.total_deductions)}</td>
                       <td className="px-3 py-3 text-right font-semibold">{inr(p.net_pay)}</td>
                       <td className="px-3 py-3 text-right">
-                        <Link
-                          href={`/enterprise/payroll/payslips/${p.id}`}
-                          className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs hover:bg-[var(--color-hover)]"
-                        >
-                          View
-                        </Link>
+                        {cycle.status === "PAID" ? (
+                          <Link
+                            href={`/enterprise/payroll/payslips/${p.id}`}
+                            className="rounded-md border border-[var(--color-border)] px-2.5 py-1 text-xs hover:bg-[var(--color-hover)]"
+                          >
+                            View
+                          </Link>
+                        ) : (
+                          <span
+                            title="Full payslip is released once the cycle is marked as paid"
+                            className="text-xs italic text-[var(--color-dim)]"
+                          >
+                            Pending
+                          </span>
+                        )}
                       </td>
                     </tr>
                   ))}
