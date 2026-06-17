@@ -105,6 +105,18 @@ export default function TemplatesPage() {
 
   const earningCodes = earnings.map((e) => e.code).filter(Boolean);
 
+  // The sample CTC only moves the numbers when at least one earning line is
+  // anchored to CTC — a "balance" line (absorbs the CTC remainder) or a
+  // percent-of-CTC line. With only fixed / percent-of-other lines the gross is
+  // independent of CTC, so editing it does nothing (by design).
+  const ctcDriven = useMemo(
+    () =>
+      earnings.some(
+        (e) => e.type === "balance" || (e.type === "percent" && e.percent_of === "CTC")
+      ),
+    [earnings]
+  );
+
   // Live preview from the real engine, resolved at the sample CTC so the author
   // sees how the rules break down (incl. statutory) before applying.
   const [preview, setPreview] = useState<StructurePreviewOut | null>(null);
@@ -404,6 +416,13 @@ export default function TemplatesPage() {
                     <label className="flex flex-col gap-1.5">
                       <span className="lbl">Sample Annual CTC</span>
                       <input type="number" className="input" value={sampleCtc} onChange={(e) => setSampleCtc(e.target.value)} />
+                      {!ctcDriven && (
+                        <span className="text-xs text-[var(--color-warn)]">
+                          No earning line is anchored to CTC, so changing this won&apos;t affect the
+                          numbers. Add a <strong>Balance (CTC)</strong> line or a{" "}
+                          <strong>Percent … of CTC</strong> line to make the package CTC-driven.
+                        </span>
+                      )}
                     </label>
                   </div>
                   <div className="grid grid-cols-3 gap-4 px-4 pb-3">

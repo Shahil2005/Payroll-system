@@ -411,7 +411,7 @@ export default function StructuresPage() {
         <Modal
           title={editingId ? "Edit Salary Structure" : "New Salary Structure"}
           onClose={() => setOpen(false)}
-          width="max-w-6xl"
+          width="max-w-[1600px]"
         >
           <form onSubmit={save} className="flex flex-col gap-6">
             {formErr && <Banner>{formErr}</Banner>}

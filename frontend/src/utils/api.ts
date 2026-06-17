@@ -290,6 +290,13 @@ export const apiClient = {
       method: "DELETE",
       headers: { ...authHeaders() },
     }).then(handle<T>),
+  // Multipart upload — do NOT set Content-Type; the browser adds the boundary.
+  putForm: <T>(path: string, form: FormData) =>
+    fetch(`${API_ROOT}${path}`, {
+      method: "PUT",
+      headers: { ...authHeaders() },
+      body: form,
+    }).then(handle<T>),
 };
 
 // Fetch a binary file with auth and trigger a browser download. Reuses the
@@ -393,6 +400,7 @@ export const payrollApi = {
     apiClient.get<Payslip[]>(`${P}/cycles/${cycleId}/payslips`),
   getPayslip: (id: string) => apiClient.get<Payslip>(`${P}/payslips/${id}`),
   downloadPayslipPdf: (id: string) => downloadFile(`${P}/payslips/${id}/pdf`),
+  downloadPayslipDocx: (id: string) => downloadFile(`${P}/payslips/${id}/docx`),
   emailPayslip: (id: string) => apiClient.post<EmailResult>(`${P}/payslips/${id}/email`),
   emailCyclePayslips: (cycleId: string) =>
     apiClient.post<BulkEmailResult>(`${P}/cycles/${cycleId}/email-payslips`),
@@ -444,10 +452,59 @@ export type OrganizationUpdate = Partial<
   Omit<Organization, "id" | "created_at" | "updated_at">
 >;
 
+export interface PayslipSettings {
+  display_name: string | null;
+  logo_url: string | null;
+  accent_color: string | null;
+  footer_note: string | null;
+  show_employer_contributions: boolean;
+  show_tax_block: boolean;
+  show_attendance: boolean;
+  use_doc_template: boolean;
+  company_name: string; // actual company name, used as the display fallback
+  has_doc_template: boolean; // whether a .docx template has been uploaded
+  doc_filename: string | null;
+}
+
+export type PayslipSettingsUpdate = Partial<
+  Omit<PayslipSettings, "company_name" | "has_doc_template" | "doc_filename">
+>;
+
+// Statutory rates/thresholds (rates are fractions: 0.12 = 12%).
+export interface StatutoryConfig {
+  pf_employee_rate: number;
+  pf_employer_rate: number;
+  pf_wage_ceiling: number;
+  eps_rate: number;
+  eps_wage_ceiling: number;
+  esi_wage_limit: number;
+  esi_employee_rate: number;
+  esi_employer_rate: number;
+  tds_new_rebate_limit: number;
+  tds_old_rebate_limit: number;
+  tds_new_std_deduction: number;
+  tds_old_std_deduction: number;
+}
+
+export type StatutoryConfigUpdate = Partial<StatutoryConfig>;
+
 export const settingsApi = {
   getOrganization: () => apiClient.get<Organization>(`${S}/organization`),
   updateOrganization: (body: OrganizationUpdate) =>
     apiClient.put<Organization>(`${S}/organization`, body),
+  getPayslipSettings: () => apiClient.get<PayslipSettings>(`${S}/payslip`),
+  updatePayslipSettings: (body: PayslipSettingsUpdate) =>
+    apiClient.put<PayslipSettings>(`${S}/payslip`, body),
+  uploadPayslipDocument: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.putForm<PayslipSettings>(`${S}/payslip/document`, form);
+  },
+  deletePayslipDocument: () => apiClient.del<PayslipSettings>(`${S}/payslip/document`),
+  downloadSampleTemplate: () => downloadFile(`${S}/payslip/document/sample`),
+  getStatutoryConfig: () => apiClient.get<StatutoryConfig>(`${S}/statutory`),
+  updateStatutoryConfig: (body: StatutoryConfigUpdate) =>
+    apiClient.put<StatutoryConfig>(`${S}/statutory`, body),
 };
 
 // --- Taxes & Forms ---------------------------------------------------------

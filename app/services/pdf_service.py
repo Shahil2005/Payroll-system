@@ -16,15 +16,47 @@ from typing import Any
 from fpdf import FPDF
 from fpdf.enums import Align, XPos, YPos
 
-_PRIMARY = (37, 99, 235)  # accent used for headings / net pay
+_PRIMARY = (37, 99, 235)  # default accent used for headings / net pay
 _MUTED = (107, 114, 128)
 _LINE = (229, 231, 235)
+_DEFAULT_FOOTER = "This is a system-generated payslip and does not require a signature."
+
+RGB = tuple[int, int, int]
 
 
 def _money(amount: Any, currency: str) -> str:
     """Format an amount as ``<CURRENCY> 1,234.00`` (no symbol — font-safe)."""
     n = float(amount or 0)
     return f"{currency} {n:,.2f}"
+
+
+# The built-in Helvetica font is latin-1 only. User-supplied branding text
+# (display name, footer note) may contain smart punctuation / ₹ / emoji, which
+# would otherwise raise during PDF output — map the common ones and replace the
+# rest so rendering can never fail on user input.
+_TRANSLATE = str.maketrans(
+    {"—": "-", "–": "-", "‘": "'", "’": "'", "“": '"', "”": '"', "₹": "INR ", "•": "-", "…": "..."}
+)
+
+
+def _latin1(text: str | None) -> str:
+    s = (text or "").translate(_TRANSLATE)
+    return s.encode("latin-1", "replace").decode("latin-1")
+
+
+def _hex_to_rgb(value: str | None, default: RGB) -> RGB:
+    """Parse ``#rrggbb`` / ``#rgb`` to an RGB tuple; fall back to ``default``."""
+    if not value:
+        return default
+    h = value.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return default
+    try:
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except ValueError:
+        return default
 
 
 def _fmt(value: Any) -> str:
@@ -37,6 +69,8 @@ def _fmt(value: Any) -> str:
 
 class _PayslipPDF(FPDF):
     # header()/footer() are fpdf2 hooks called automatically on each page.
+    footer_note: str = _DEFAULT_FOOTER
+
     def header(self) -> None:
         pass
 
@@ -44,12 +78,7 @@ class _PayslipPDF(FPDF):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(*_MUTED)
-        self.cell(
-            0,
-            10,
-            "This is a system-generated payslip and does not require a signature.",
-            align=Align.C,
-        )
+        self.cell(0, 10, self.footer_note, align=Align.C)
 
 
 def render_payslip_pdf(
@@ -72,15 +101,37 @@ def render_payslip_pdf(
     working_days: int,
     currency: str = "INR",
     employer_contributions: list[dict[str, Any]] | None = None,
+    accent_color: str | None = None,
+    footer_note: str | None = None,
+    logo_url: str | None = None,
+    show_employer_contributions: bool = True,
+    show_attendance: bool = True,
 ) -> bytes:
-    """Render a single payslip to PDF bytes."""
+    """Render a single payslip to PDF bytes.
+
+    Branding (``accent_color``, ``footer_note``, ``logo_url``) and the section
+    toggles come from the company's payslip template; each falls back to the
+    built-in default when omitted, so callers that don't pass them are unchanged.
+    """
+    accent = _hex_to_rgb(accent_color, _PRIMARY)
+    company_name = _latin1(company_name)
     pdf = _PayslipPDF(format="A4")
+    pdf.footer_note = _latin1((footer_note or "").strip()) or _DEFAULT_FOOTER
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
     epw = pdf.epw  # effective page width (inside margins)
 
-    # --- Header band: company (left) + PAYSLIP/ref (right) ---
+    # --- Optional company logo (best-effort: skip silently on any failure) ---
     top = pdf.get_y()
+    if logo_url:
+        try:
+            pdf.image(logo_url, x=pdf.l_margin, y=top, h=12)
+            pdf.set_y(top + 14)
+        except Exception:
+            pdf.set_y(top)
+
+    # --- Header band: company (left) + PAYSLIP/ref (right) ---
+    name_top = pdf.get_y()
     pdf.set_font("Helvetica", "B", 22)
     pdf.set_text_color(20, 20, 20)
     pdf.cell(epw / 2, 9, company_name, new_x=XPos.LEFT, new_y=YPos.NEXT)
@@ -88,9 +139,9 @@ def render_payslip_pdf(
     pdf.set_text_color(*_MUTED)
     pdf.cell(epw / 2, 5, "Payslip", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    pdf.set_xy(pdf.l_margin + epw / 2, top)
+    pdf.set_xy(pdf.l_margin + epw / 2, name_top)
     pdf.set_font("Helvetica", "B", 16)
-    pdf.set_text_color(*_PRIMARY)
+    pdf.set_text_color(*accent)
     pdf.cell(epw / 2, 9, "PAYSLIP", align=Align.R, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_x(pdf.l_margin + epw / 2)
     pdf.set_font("Helvetica", "", 9)
@@ -123,7 +174,7 @@ def render_payslip_pdf(
     pdf.ln(4)
 
     # --- Employer contributions (informational — not deducted from the employee) ---
-    if employer_contributions:
+    if show_employer_contributions and employer_contributions:
         er_total = sum((Decimal(str(c.get("amount") or 0)) for c in employer_contributions), Decimal("0"))
         _section_table(
             pdf,
@@ -136,15 +187,16 @@ def render_payslip_pdf(
         pdf.ln(4)
 
     # --- Attendance ---
-    _info_row(
-        pdf,
-        "Working Days",
-        _fmt(working_days),
-        "LOP Days",
-        _fmt(lop_days),
-    )
-    _info_row(pdf, "Paid Days", _fmt(paid_days), "", "")
-    pdf.ln(4)
+    if show_attendance:
+        _info_row(
+            pdf,
+            "Working Days",
+            _fmt(working_days),
+            "LOP Days",
+            _fmt(lop_days),
+        )
+        _info_row(pdf, "Paid Days", _fmt(paid_days), "", "")
+        pdf.ln(4)
     _hr(pdf)
     pdf.ln(3)
 
@@ -152,7 +204,7 @@ def render_payslip_pdf(
     pdf.set_font("Helvetica", "B", 13)
     pdf.set_text_color(20, 20, 20)
     pdf.cell(epw * 0.6, 10, "Net Payable", new_x=XPos.RIGHT, new_y=YPos.TOP)
-    pdf.set_text_color(*_PRIMARY)
+    pdf.set_text_color(*accent)
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(epw * 0.4, 10, _money(net, currency), align=Align.R, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 

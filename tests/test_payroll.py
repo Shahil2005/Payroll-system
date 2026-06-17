@@ -627,6 +627,21 @@ def test_employee_crud_and_soft_delete() -> None:
         ids = {e["id"] for e in c.get("/api/v1/enterprise/employees").json()}
         assert new_id not in ids
 
+        # The email is still held by the soft-deleted row (unique constraint has
+        # no deleted_at filter), so re-creating it returns a clean 409, not 500.
+        readd = c.post(
+            "/api/v1/enterprise/employees",
+            json={"first_name": "Sam3", "email": "sam@example.com"},
+        )
+        assert readd.status_code == status.HTTP_409_CONFLICT
+
+        # Updating one employee's email to another's is also blocked.
+        clash = c.put(
+            f"/api/v1/enterprise/employees/{EMP1}",
+            json={"email": "jane@example.com"},  # seeded EMP2's email
+        )
+        assert clash.status_code == status.HTTP_409_CONFLICT
+
 
 # ---------------------------------------------------------------------------
 # Auth & RBAC (spec §7)
@@ -898,6 +913,119 @@ def test_organization_update_is_admin_only() -> None:
         assert c.get("/api/v1/enterprise/settings/organization").status_code == status.HTTP_200_OK
         resp = c.put(
             "/api/v1/enterprise/settings/organization", json={"name": "Hacked"}
+        )
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_payslip_settings_get_update_and_defaults() -> None:
+    # NOTE: the scratch DB never truncates `companies`, so this test must not
+    # assume a pristine row — it sets its own known baseline first.
+    with authed_client() as c:  # ADMIN
+        # GET always carries the real company name (UI display fallback).
+        assert c.get("/api/v1/enterprise/settings/payslip").json()["company_name"]
+
+        # Baseline: blank text (-> null) + all sections on.
+        base = c.put(
+            "/api/v1/enterprise/settings/payslip",
+            json={
+                "display_name": "",
+                "logo_url": "",
+                "accent_color": "",
+                "footer_note": "",
+                "show_employer_contributions": True,
+                "show_tax_block": True,
+                "show_attendance": True,
+            },
+        ).json()
+        assert base["display_name"] is None
+        assert base["accent_color"] is None
+        assert base["show_attendance"] is True
+
+        # Partial update: branding + one toggle off; others must be untouched.
+        b = c.put(
+            "/api/v1/enterprise/settings/payslip",
+            json={
+                "display_name": "ACME Payroll",
+                "accent_color": "#16A34A",  # normalised to lower-case
+                "footer_note": "  ",  # blank -> null
+                "show_attendance": False,
+            },
+        ).json()
+        assert b["display_name"] == "ACME Payroll"
+        assert b["accent_color"] == "#16a34a"
+        assert b["footer_note"] is None
+        assert b["show_attendance"] is False
+        assert b["show_tax_block"] is True  # untouched toggle preserved
+
+        # Persisted across requests.
+        again = c.get("/api/v1/enterprise/settings/payslip").json()
+        assert again["display_name"] == "ACME Payroll"
+        assert again["show_attendance"] is False
+
+        # Invalid colour is rejected.
+        bad = c.put("/api/v1/enterprise/settings/payslip", json={"accent_color": "green"})
+        assert bad.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def test_payslip_settings_update_is_admin_only() -> None:
+    with authed_client(VIEWER) as c:
+        assert c.get("/api/v1/enterprise/settings/payslip").status_code == status.HTTP_200_OK
+        resp = c.put(
+            "/api/v1/enterprise/settings/payslip", json={"display_name": "Nope"}
+        )
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_statutory_config_applies_across_payroll() -> None:
+    with authed_client() as c:  # ADMIN
+        original = c.get("/api/v1/enterprise/settings/statutory").json()
+        assert original["pf_wage_ceiling"] == 15000
+        assert original["pf_employee_rate"] == 0.12
+        try:
+            # Override: raise the PF ceiling and lower the employee rate.
+            upd = c.put(
+                "/api/v1/enterprise/settings/statutory",
+                json={"pf_wage_ceiling": 50000, "pf_employee_rate": 0.10},
+            )
+            assert upd.status_code == status.HTTP_200_OK, upd.text
+            b = upd.json()
+            assert b["pf_wage_ceiling"] == 50000
+            assert b["pf_employee_rate"] == 0.10
+            assert b["esi_wage_limit"] == 21000  # untouched default preserved
+
+            # The override flows into the live preview (same engine as a run):
+            # PF employee = 10% of min(40000, 50000) = 4000 (was 1800 by default).
+            prev = c.post(
+                "/api/v1/enterprise/payroll/structures/preview",
+                json={
+                    "ctc": 1200000,
+                    "pay_frequency": "MONTHLY",
+                    "components": [{"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 40000}],
+                    "default_deductions": [],
+                    "lop_days": 0,
+                    "pf_enabled": True,
+                    "pf_cap_at_ceiling": True,
+                    "esi_enabled": False,
+                    "pt_enabled": False,
+                    "tds_enabled": False,
+                },
+            ).json()
+            pf = [d for d in prev["deductions"] if d["code"] == "PF"]
+            assert pf and float(pf[0]["amount"]) == 4000.0
+
+            # Validation: a rate above 100% is rejected.
+            bad = c.put("/api/v1/enterprise/settings/statutory", json={"pf_employee_rate": 1.5})
+            assert bad.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        finally:
+            # Restore defaults so other tests compute with standard rates.
+            c.put("/api/v1/enterprise/settings/statutory", json=original)
+
+
+def test_statutory_config_update_is_admin_only() -> None:
+    with authed_client(VIEWER) as c:
+        assert c.get("/api/v1/enterprise/settings/statutory").status_code == status.HTTP_200_OK
+        resp = c.put(
+            "/api/v1/enterprise/settings/statutory", json={"pf_employee_rate": 0.10}
         )
         assert resp.status_code == status.HTTP_403_FORBIDDEN
 
@@ -1187,6 +1315,90 @@ def test_payslip_pdf_download() -> None:
         assert r.headers["content-type"] == "application/pdf"
         assert r.content[:4] == b"%PDF"
         assert "attachment" in r.headers.get("content-disposition", "")
+
+
+def _sample_docx_template() -> bytes:
+    """A minimal .docx template with docxtpl tokens, built in-memory."""
+    import io
+
+    from docx import Document
+
+    d = Document()
+    d.add_heading("{{ company_name }} — Payslip", level=1)
+    d.add_paragraph("Employee: {{ employee.name }}")
+    d.add_paragraph("Net Pay: {{ net }}")
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+def test_payslip_doc_template_upload_fill_and_pdf_fallback() -> None:
+    docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            # Reject non-docx uploads.
+            bad = c.put(
+                "/api/v1/enterprise/settings/payslip/document",
+                files={"file": ("x.txt", b"not a docx", "text/plain")},
+            )
+            assert bad.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+            # Upload a real .docx template.
+            up = c.put(
+                "/api/v1/enterprise/settings/payslip/document",
+                files={"file": ("tpl.docx", _sample_docx_template(), docx_mime)},
+            )
+            assert up.status_code == status.HTTP_200_OK, up.text
+            assert up.json()["has_doc_template"] is True
+            assert up.json()["doc_filename"] == "tpl.docx"
+
+            # Download the filled .docx — tokens replaced, valid OOXML (starts PK).
+            doc = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/docx")
+            assert doc.status_code == status.HTTP_200_OK, doc.text
+            assert doc.content[:2] == b"PK"
+            assert "attachment" in doc.headers.get("content-disposition", "")
+            # Assert tokens were actually FILLED (not just a valid file): the
+            # employee's name and net pay must appear, and no raw {{ }} remain.
+            import io as _io
+
+            from docx import Document as _Doc
+
+            filled = "\n".join(p.text for p in _Doc(_io.BytesIO(doc.content)).paragraphs)
+            assert "John Doe" in filled, filled
+            assert "{{" not in filled, f"unfilled token remains: {filled}"
+
+            # Enable the template; the PDF endpoint still returns a PDF, falling
+            # back to the built-in layout when no docx->pdf converter is present.
+            c.put("/api/v1/enterprise/settings/payslip", json={"use_doc_template": True})
+            pdf = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/pdf")
+            assert pdf.status_code == status.HTTP_200_OK
+            assert pdf.content[:4] == b"%PDF"
+        finally:
+            # Remove the template (also clears use_doc_template) so other tests
+            # generate the standard built-in payslip.
+            cleared = c.delete("/api/v1/enterprise/settings/payslip/document")
+            assert cleared.json()["has_doc_template"] is False
+            assert cleared.json()["use_doc_template"] is False
+
+
+def test_payslip_doc_endpoints_admin_only() -> None:
+    with authed_client(VIEWER) as c:
+        docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        up = c.put(
+            "/api/v1/enterprise/settings/payslip/document",
+            files={"file": ("tpl.docx", _sample_docx_template(), docx_mime)},
+        )
+        assert up.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_payslip_docx_404_without_template() -> None:
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        # No template uploaded for this company in this test's state.
+        c.delete("/api/v1/enterprise/settings/payslip/document")
+        r = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/docx")
+        assert r.status_code == status.HTTP_404_NOT_FOUND
 
 
 def _configure_smtp(monkeypatch: pytest.MonkeyPatch) -> None:

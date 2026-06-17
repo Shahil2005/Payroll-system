@@ -3,6 +3,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.constants import Permission
 from app.core.dependencies import DBSessionDep, get_current_company_id, require_permission
@@ -41,6 +42,15 @@ async def create_employee(
     try:
         await db.commit()
         await db.refresh(employee)
+    except IntegrityError:
+        # Backstop for the unique (company_id, email) constraint — covers an
+        # email still held by a soft-deleted employee, or a concurrent insert
+        # that slips past the check above.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An employee with this email already exists in this company.",
+        )
     except Exception:
         await db.rollback()
         raise
@@ -105,11 +115,36 @@ async def update_employee(
     if not emp:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    fields = payload.model_dump(exclude_unset=True)
+    # Block changing the email to one another active employee already uses.
+    if "email" in fields and fields["email"] != emp.email:
+        clash = (
+            await db.execute(
+                select(Employee).where(
+                    Employee.company_id == company_id,
+                    Employee.email == fields["email"],
+                    Employee.id != id,
+                    Employee.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if clash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An employee with this email already exists in this company.",
+            )
+
+    for field, value in fields.items():
         setattr(emp, field, value)
     try:
         await db.commit()
         await db.refresh(emp)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An employee with this email already exists in this company.",
+        )
     except Exception:
         await db.rollback()
         raise

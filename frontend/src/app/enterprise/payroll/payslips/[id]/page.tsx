@@ -4,10 +4,12 @@ import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   payrollApi,
+  settingsApi,
   inr,
   type Employee,
   type PayrollCycle,
   type Payslip,
+  type PayslipSettings,
 } from "@/utils/api";
 import { Banner, PayslipBadge } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
@@ -18,9 +20,11 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
   const [slip, setSlip] = useState<Payslip | null>(null);
   const [cycle, setCycle] = useState<PayrollCycle | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
+  const [tpl, setTpl] = useState<PayslipSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingDoc, setDownloadingDoc] = useState(false);
   const [emailing, setEmailing] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "err"; msg: string } | null>(null);
 
@@ -33,6 +37,18 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
       setNotice({ tone: "err", msg: (err as Error).message });
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function handleDownloadDoc() {
+    setDownloadingDoc(true);
+    setNotice(null);
+    try {
+      await payrollApi.downloadPayslipDocx(id);
+    } catch (err) {
+      setNotice({ tone: "err", msg: (err as Error).message });
+    } finally {
+      setDownloadingDoc(false);
     }
   }
 
@@ -54,12 +70,14 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
       try {
         const p = await payrollApi.getPayslip(id);
         setSlip(p);
-        const [c, emps] = await Promise.all([
+        const [c, emps, settings] = await Promise.all([
           payrollApi.getCycle(p.cycle_id),
           payrollApi.listEmployees(),
+          settingsApi.getPayslipSettings().catch(() => null),
         ]);
         setCycle(c);
         setEmployee(emps.find((e) => e.id === p.employee_id) ?? null);
+        setTpl(settings);
       } catch (err) {
         setError((err as Error).message);
       } finally {
@@ -71,6 +89,9 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
   if (loading) return <p className="p-12 text-center text-[var(--color-muted)]">Loading…</p>;
   if (error) return <div className="p-6"><Banner>{error}</Banner></div>;
   if (!slip || !cycle) return <p className="p-12 text-center text-[var(--color-muted)]">Payslip not found.</p>;
+
+  const companyName = tpl?.display_name || tpl?.company_name || "Company";
+  const accent = tpl?.accent_color || undefined;
 
   return (
     <div className="animate-fade-in flex flex-col gap-6">
@@ -87,6 +108,16 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
             <span className="material-symbols-outlined text-[18px]">download</span>
             {downloading ? "Preparing…" : "Download PDF"}
           </button>
+          {tpl?.has_doc_template && (
+            <button
+              onClick={handleDownloadDoc}
+              disabled={downloadingDoc}
+              className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] px-4 py-2 text-sm font-semibold text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:opacity-60"
+            >
+              <span className="material-symbols-outlined text-[18px]">description</span>
+              {downloadingDoc ? "Preparing…" : "Download as Word"}
+            </button>
+          )}
           {can("payroll:pay") && (
             <button
               onClick={handleEmail}
@@ -120,12 +151,17 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
 
       <div className="mx-auto w-full max-w-3xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-8 print:border-0">
         <div className="mb-6 flex items-start justify-between border-b border-[var(--color-border)] pb-5">
-          <div>
-            <div className="text-2xl font-extrabold tracking-tight">CROAR</div>
-            <div className="text-xs text-[var(--color-muted)]">Croar Technologies Pvt Ltd</div>
+          <div className="flex flex-col gap-1.5">
+            {tpl?.logo_url && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={tpl.logo_url} alt={companyName} className="max-h-12 w-auto object-contain" />
+            )}
+            <div className="text-2xl font-extrabold tracking-tight">{companyName}</div>
           </div>
           <div className="text-right">
-            <div className="text-lg font-bold">PAYSLIP</div>
+            <div className="text-lg font-bold" style={accent ? { color: accent } : undefined}>
+              PAYSLIP
+            </div>
             <div className="text-xs text-[var(--color-muted)]">Ref #{slip.id.slice(0, 8)}</div>
             <div className="mt-1"><PayslipBadge status={slip.status} /></div>
           </div>
@@ -143,7 +179,7 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
           <Breakdown title="Deductions" lines={slip.deductions ?? []} currency={slip.currency} total={Number(slip.total_deductions)} totalLabel="Total Deductions" negative />
         </div>
 
-        {slip.employer_contributions && slip.employer_contributions.length > 0 && (
+        {tpl?.show_employer_contributions !== false && slip.employer_contributions && slip.employer_contributions.length > 0 && (
           <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
             <Breakdown
               title="Employer Contributions (not deducted)"
@@ -155,17 +191,19 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
           </div>
         )}
 
-        <div className="mt-6 grid grid-cols-3 gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4 text-center text-sm">
-          <Info label="Working Days" value={String(DEFAULT_WD)} center />
-          <Info label="LOP Days" value={String(Number(slip.lop_days))} center />
-          <Info label="Paid Days" value={String(Number(slip.paid_days ?? 0))} center />
-        </div>
+        {tpl?.show_attendance !== false && (
+          <div className="mt-6 grid grid-cols-3 gap-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4 text-center text-sm">
+            <Info label="Working Days" value={String(DEFAULT_WD)} center />
+            <Info label="LOP Days" value={String(Number(slip.lop_days))} center />
+            <Info label="Paid Days" value={String(Number(slip.paid_days ?? 0))} center />
+          </div>
+        )}
 
         {(() => {
           const tds = (slip.statutory as Record<string, unknown> | null)?.tds as
             | Record<string, number | string>
             | undefined;
-          if (!tds) return null;
+          if (!tds || tpl?.show_tax_block === false) return null;
           return (
             <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
               <div className="mb-2 flex items-center justify-between">
@@ -189,8 +227,19 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
 
         <div className="mt-6 flex items-center justify-between border-t border-[var(--color-border)] pt-5">
           <span className="text-sm text-[var(--color-muted)]">Net Payable</span>
-          <span className="text-3xl font-extrabold text-[var(--color-accent)]">{inr(slip.net_pay, slip.currency)}</span>
+          <span
+            className="text-3xl font-extrabold text-[var(--color-accent)]"
+            style={accent ? { color: accent } : undefined}
+          >
+            {inr(slip.net_pay, slip.currency)}
+          </span>
         </div>
+
+        {tpl?.footer_note && (
+          <p className="mt-6 border-t border-[var(--color-border)] pt-4 text-center text-xs text-[var(--color-muted)]">
+            {tpl.footer_note}
+          </p>
+        )}
       </div>
     </div>
   );

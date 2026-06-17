@@ -97,17 +97,24 @@ def compute_tds(
     declarations: dict[str, Any] | None = None,
     prev_employer_income: Decimal = Decimal("0"),
     prev_employer_tds: Decimal = Decimal("0"),
+    new_rebate_limit: Decimal = _NEW_REBATE_LIMIT,
+    old_rebate_limit: Decimal = _OLD_REBATE_LIMIT,
+    new_std_deduction: Decimal = _NEW_STD_DEDUCTION,
+    old_std_deduction: Decimal = _OLD_STD_DEDUCTION,
 ) -> dict[str, Any]:
     """Estimate annual tax and the monthly TDS to withhold.
 
     annual_gross: projected gross for the year from THIS employer (e.g. monthly
     gross x 12). prev_employer_* fold in prior income/TDS already taxed/deducted.
+    Rebate limits and standard deductions default to the code constants but may
+    be overridden per company (Settings → Statutory Compliance); the slab
+    brackets and 80C/80D caps stay code-defined.
     """
     declarations = declarations or {}
     is_old = regime == TaxRegime.OLD.value
 
     total_income = annual_gross + prev_employer_income
-    std_deduction = _OLD_STD_DEDUCTION if is_old else _NEW_STD_DEDUCTION
+    std_deduction = old_std_deduction if is_old else new_std_deduction
     declared = _old_regime_deductions(declarations) if is_old else Decimal("0")
 
     taxable_income = total_income - std_deduction - declared
@@ -115,7 +122,7 @@ def compute_tds(
         taxable_income = Decimal("0")
 
     slabs = _OLD_REGIME_SLABS if is_old else _NEW_REGIME_SLABS
-    rebate_limit = _OLD_REBATE_LIMIT if is_old else _NEW_REBATE_LIMIT
+    rebate_limit = old_rebate_limit if is_old else new_rebate_limit
 
     tax_before_rebate = _slab_tax(taxable_income, slabs)
     rebate = tax_before_rebate if taxable_income <= rebate_limit else Decimal("0")

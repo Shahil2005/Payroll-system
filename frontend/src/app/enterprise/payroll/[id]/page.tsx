@@ -30,6 +30,8 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Sentinel select value meaning "apply this adjustment to every employee".
+  const ALL_EMPLOYEES = "__all__";
   const emptyAdj = { employee_id: "", kind: "earning" as AdjustmentKind, code: "", label: "", amount: "", note: "" };
   const [adjOpen, setAdjOpen] = useState(false);
   const [adjSaving, setAdjSaving] = useState(false);
@@ -67,14 +69,22 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
     setAdjErr(null);
     setAdjSaving(true);
     try {
-      await payrollApi.addAdjustment(id, {
-        employee_id: adjForm.employee_id,
+      const base = {
         kind: adjForm.kind,
         code: adjForm.code,
         label: adjForm.label,
         amount: Number(adjForm.amount),
         note: adjForm.note || null,
-      });
+      };
+      if (adjForm.employee_id === ALL_EMPLOYEES) {
+        if (employees.length === 0) throw new Error("No employees to apply this adjustment to.");
+        // Fan out: one adjustment per employee (backend takes a single employee_id).
+        await Promise.all(
+          employees.map((emp) => payrollApi.addAdjustment(id, { ...base, employee_id: emp.id }))
+        );
+      } else {
+        await payrollApi.addAdjustment(id, { ...base, employee_id: adjForm.employee_id });
+      }
       setAdjOpen(false);
       setAdjForm(emptyAdj);
       await load();
@@ -413,6 +423,11 @@ export default function CycleDetail({ params }: { params: Promise<{ id: string }
                 onChange={(e) => setAdjForm({ ...adjForm, employee_id: e.target.value })}
               >
                 <option value="">— Select —</option>
+                {employees.length > 0 && (
+                  <option value={ALL_EMPLOYEES}>
+                    All employees ({employees.length})
+                  </option>
+                )}
                 {employees.map((e) => (
                   <option key={e.id} value={e.id}>
                     {e.first_name} {e.last_name}

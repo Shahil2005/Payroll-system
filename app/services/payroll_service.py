@@ -17,6 +17,7 @@ from app.constants import (
     PayslipStatus,
     TaxRegime,
 )
+from app.models.company import Company
 from app.models.employee import Employee
 from app.models.payroll import (
     PayrollAdjustment,
@@ -26,8 +27,14 @@ from app.models.payroll import (
     SalaryTemplate,
 )
 from app.models.taxes import EmployeeTaxProfile
+from app.schema.settings import StatutoryConfig
 from app.services import statutory as statutory_rules
 from app.services import tax_engine
+
+
+def _dec(value: float | int) -> Decimal:
+    """Config values arrive as floats (JSON-native); convert for the engine."""
+    return Decimal(str(value))
 
 
 def _q(amount: Decimal) -> Decimal:
@@ -67,6 +74,7 @@ def compute_payslip(
     adjustments: list[dict[str, Any]] | None = None,
     tds_enabled: bool = False,
     tax_profile: dict[str, Any] | None = None,
+    statutory: StatutoryConfig | None = None,
 ) -> dict[str, Any]:
     """Pure payslip calculation (spec §5).
 
@@ -159,8 +167,11 @@ def compute_payslip(
         deductions.append({"code": code, "label": line.get("label", code), "amount": float(amt)})
 
     # --- Statutory (PF / ESI / PT) — opt-in per structure ---
+    # Resolve the company's statutory config (rates/thresholds); defaults mirror
+    # the code constants when no override is supplied.
+    cfg = statutory or StatutoryConfig()
     employer_contributions: list[dict[str, Any]] = []
-    statutory: dict[str, Any] = {"version": statutory_rules.RULESET_VERSION}
+    statutory_snapshot: dict[str, Any] = {"version": statutory_rules.RULESET_VERSION}
 
     if structure.pf_enabled:
         codes = structure.pf_wage_codes or ["BASIC"]
@@ -168,7 +179,15 @@ def compute_payslip(
         if pf_wage <= 0:  # fall back to gross if the named codes aren't present
             pf_wage = gross
         cap = True if structure.pf_cap_at_ceiling is None else bool(structure.pf_cap_at_ceiling)
-        pf = statutory_rules.compute_pf(pf_wage, cap_at_ceiling=cap)
+        pf = statutory_rules.compute_pf(
+            pf_wage,
+            cap_at_ceiling=cap,
+            employee_rate=_dec(cfg.pf_employee_rate),
+            employer_rate=_dec(cfg.pf_employer_rate),
+            wage_ceiling=_dec(cfg.pf_wage_ceiling),
+            eps_rate=_dec(cfg.eps_rate),
+            eps_wage_ceiling=_dec(cfg.eps_wage_ceiling),
+        )
         deductions.append(
             {"code": "PF", "label": "Provident Fund (Employee)", "amount": float(pf["employee"])}
         )
@@ -179,11 +198,16 @@ def compute_payslip(
         employer_contributions.append(
             {"code": "EPS_ER", "label": "Pension (EPS, Employer)", "amount": float(pf["employer_eps"])}
         )
-        statutory["pf"] = {k: float(v) for k, v in pf.items()}
+        statutory_snapshot["pf"] = {k: float(v) for k, v in pf.items()}
 
     if structure.esi_enabled:
-        esi = statutory_rules.compute_esi(gross)
-        statutory["esi"] = {
+        esi = statutory_rules.compute_esi(
+            gross,
+            wage_limit=_dec(cfg.esi_wage_limit),
+            employee_rate=_dec(cfg.esi_employee_rate),
+            employer_rate=_dec(cfg.esi_employer_rate),
+        )
+        statutory_snapshot["esi"] = {
             "covered": esi["covered"],
             "employee": float(esi["employee"]),
             "employer": float(esi["employer"]),
@@ -197,7 +221,7 @@ def compute_payslip(
 
     if structure.pt_enabled:
         pt = statutory_rules.compute_pt(pt_state, gross)
-        statutory["pt"] = {"amount": float(pt["amount"]), "state": pt["state"], "note": pt["note"]}
+        statutory_snapshot["pt"] = {"amount": float(pt["amount"]), "state": pt["state"], "note": pt["note"]}
         if pt["amount"] > 0:
             deductions.append(
                 {"code": "PT", "label": "Professional Tax", "amount": float(pt["amount"])}
@@ -216,8 +240,12 @@ def compute_payslip(
             declarations=profile,
             prev_employer_income=Decimal(str(profile.get("prev_employer_income") or "0")),
             prev_employer_tds=Decimal(str(profile.get("prev_employer_tds") or "0")),
+            new_rebate_limit=_dec(cfg.tds_new_rebate_limit),
+            old_rebate_limit=_dec(cfg.tds_old_rebate_limit),
+            new_std_deduction=_dec(cfg.tds_new_std_deduction),
+            old_std_deduction=_dec(cfg.tds_old_std_deduction),
         )
-        statutory["tds"] = {
+        statutory_snapshot["tds"] = {
             k: (float(v) if isinstance(v, Decimal) else v) for k, v in tds.items()
         }
         monthly_tds = tds["monthly_tds"]
@@ -255,8 +283,16 @@ def compute_payslip(
         "paid_days": paid_days,
         "employer_contributions": employer_contributions,
         "employer_total": _q(employer_total),
-        "statutory": statutory,
+        "statutory": statutory_snapshot,
     }
+
+
+async def _load_statutory_config(db: AsyncSession, company_id: uuid.UUID) -> StatutoryConfig:
+    """The company's statutory rate/threshold overrides (defaults if unset)."""
+    raw = (
+        await db.execute(select(Company.statutory_settings).where(Company.id == company_id))
+    ).scalar_one_or_none()
+    return StatutoryConfig.from_stored(raw)
 
 
 async def preview_structure(
@@ -333,6 +369,7 @@ async def preview_structure(
         pt_state=pt_state,
         tds_enabled=bool(payload.get("tds_enabled")),
         tax_profile=tax_profile,
+        statutory=await _load_statutory_config(db, company_id),
     )
 
 
@@ -623,6 +660,9 @@ async def run_payroll(
         for p in tax_profiles
     }
 
+    # Company statutory overrides (rates/thresholds) — loaded once for the run.
+    statutory_config = await _load_statutory_config(db, company_id)
+
     created_count = 0
     updated_count = 0
     skipped: list[dict[str, Any]] = []
@@ -666,6 +706,7 @@ async def run_payroll(
                 adjustments=adjustments_by_employee.get(employee.id),
                 tds_enabled=bool(struct.tds_enabled),
                 tax_profile=tax_profile_by_employee.get(employee.id),
+                statutory=statutory_config,
             )
         except ValueError as exc:
             skipped.append({"employee_id": employee.id, "reason": str(exc)})

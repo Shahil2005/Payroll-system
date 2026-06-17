@@ -74,19 +74,29 @@ def _round_up(amount: Decimal) -> Decimal:
     return amount.quantize(Decimal("1"), rounding=ROUND_CEILING).quantize(Decimal("0.01"))
 
 
-def compute_pf(pf_wage: Decimal, *, cap_at_ceiling: bool = True) -> dict[str, Any]:
+def compute_pf(
+    pf_wage: Decimal,
+    *,
+    cap_at_ceiling: bool = True,
+    employee_rate: Decimal = PF_EMPLOYEE_RATE,
+    employer_rate: Decimal = PF_EMPLOYER_RATE,
+    wage_ceiling: Decimal = PF_WAGE_CEILING,
+    eps_rate: Decimal = EPS_RATE,
+    eps_wage_ceiling: Decimal = EPS_WAGE_CEILING,
+) -> dict[str, Any]:
     """Employee + employer EPF on ``pf_wage`` (usually Basic, or Basic+DA).
 
-    When ``cap_at_ceiling`` the contributory wage is min(pf_wage, ₹15,000).
-    The employer 12% splits into EPS (8.33% of the EPS-capped wage) and EPF
-    (the remainder).
+    When ``cap_at_ceiling`` the contributory wage is min(pf_wage, ceiling).
+    The employer share splits into EPS (of the EPS-capped wage) and EPF
+    (the remainder). Rates/ceilings default to the code constants but may be
+    overridden per company (Settings → Statutory Compliance).
     """
-    contributory = min(pf_wage, PF_WAGE_CEILING) if cap_at_ceiling else pf_wage
-    eps_wage = min(pf_wage, EPS_WAGE_CEILING)
+    contributory = min(pf_wage, wage_ceiling) if cap_at_ceiling else pf_wage
+    eps_wage = min(pf_wage, eps_wage_ceiling)
 
-    employee = _round(contributory * PF_EMPLOYEE_RATE)
-    employer_total = _round(contributory * PF_EMPLOYER_RATE)
-    employer_eps = _round(eps_wage * EPS_RATE)
+    employee = _round(contributory * employee_rate)
+    employer_total = _round(contributory * employer_rate)
+    employer_eps = _round(eps_wage * eps_rate)
     employer_epf = _round(employer_total - employer_eps)
     return {
         "employee": employee,
@@ -97,14 +107,23 @@ def compute_pf(pf_wage: Decimal, *, cap_at_ceiling: bool = True) -> dict[str, An
     }
 
 
-def compute_esi(gross: Decimal) -> dict[str, Any]:
-    """Employee + employer ESI when ``gross`` is within the coverage limit."""
-    if gross > ESI_WAGE_LIMIT:
+def compute_esi(
+    gross: Decimal,
+    *,
+    wage_limit: Decimal = ESI_WAGE_LIMIT,
+    employee_rate: Decimal = ESI_EMPLOYEE_RATE,
+    employer_rate: Decimal = ESI_EMPLOYER_RATE,
+) -> dict[str, Any]:
+    """Employee + employer ESI when ``gross`` is within the coverage limit.
+
+    Limit/rates default to the code constants but may be overridden per company.
+    """
+    if gross > wage_limit:
         return {"covered": False, "employee": Decimal("0.00"), "employer": Decimal("0.00")}
     return {
         "covered": True,
-        "employee": _round_up(gross * ESI_EMPLOYEE_RATE),
-        "employer": _round_up(gross * ESI_EMPLOYER_RATE),
+        "employee": _round_up(gross * employee_rate),
+        "employer": _round_up(gross * employer_rate),
     }
 
 

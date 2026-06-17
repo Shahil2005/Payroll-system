@@ -39,7 +39,8 @@ from app.schema.payroll import (
     TemplateApplyIn,
     TemplateApplyResult,
 )
-from app.services import email_service, payroll_service, pdf_service
+from app.schema.settings import PayslipSettings
+from app.services import docx_service, email_service, payroll_service, pdf_service
 
 router = APIRouter(prefix="/api/v1/enterprise/payroll", tags=["payroll"])
 
@@ -148,13 +149,19 @@ async def preview_salary_structure(
 async def list_salary_structures(
     db: DBSessionDep,
     employee_id: uuid.UUID | None = None,
+    active_only: bool = True,
     company_id: uuid.UUID = Depends(get_current_company_id),
     _: object = Depends(require_permission(Permission.PAYROLL_READ)),
 ) -> list[SalaryStructure]:
+    """List salary structures. Defaults to ``active_only`` so replaced/superseded
+    structures (deactivated on edit or template re-apply) don't show up as
+    duplicate rows for the same employee. Pass ``active_only=false`` for history."""
     stmt = select(SalaryStructure).where(
         SalaryStructure.company_id == company_id,
         SalaryStructure.deleted_at.is_(None),
     )
+    if active_only:
+        stmt = stmt.where(SalaryStructure.is_active.is_(True))
     if employee_id is not None:
         stmt = stmt.where(SalaryStructure.employee_id == employee_id)
     rows = (await db.execute(stmt)).scalars().all()
@@ -744,8 +751,10 @@ def _render_pdf(
         if employee
         else str(payslip.employee_id)
     )
+    ps = PayslipSettings.from_stored(company.payslip_settings if company else None)
+    company_label = ps.display_name or (company.name if company else "Company")
     return pdf_service.render_payslip_pdf(
-        company_name=company.name if company else "Company",
+        company_name=company_label,
         employee_name=emp_name,
         employee_email=employee.email if employee else "",
         ref=str(payslip.id)[:8],
@@ -763,6 +772,11 @@ def _render_pdf(
         working_days=DEFAULT_WORKING_DAYS,
         currency=payslip.currency,
         employer_contributions=payslip.employer_contributions or [],
+        accent_color=ps.accent_color,
+        footer_note=ps.footer_note,
+        logo_url=ps.logo_url,
+        show_employer_contributions=ps.show_employer_contributions,
+        show_attendance=ps.show_attendance,
     )
 
 
@@ -777,6 +791,139 @@ def _pdf_filename(cycle: PayrollCycle, employee: Employee | None, payslip: Paysl
     return f"payslip-{safe_who}-{safe_cycle}.pdf"
 
 
+def _docx_context(
+    payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
+) -> dict:
+    """Build the token context handed to an uploaded .docx template."""
+    ps = PayslipSettings.from_stored(company.payslip_settings if company else None)
+    cur = payslip.currency
+
+    def money(v: object) -> str:
+        return f"{cur} {float(v or 0):,.2f}"
+
+    def lines(rows: list[dict] | None) -> list[dict]:
+        return [
+            {
+                "code": r.get("code", ""),
+                "label": r.get("label") or r.get("code", ""),
+                "amount": money(r.get("amount")),
+                "amount_raw": float(r.get("amount") or 0),
+            }
+            for r in (rows or [])
+        ]
+
+    emp_name = (
+        f"{employee.first_name} {employee.last_name}".strip()
+        if employee
+        else str(payslip.employee_id)
+    )
+
+    def block(rows: list[dict]) -> str:
+        # Preformatted "label<TAB>amount" lines; docxtpl turns the newlines into
+        # real Word line breaks, so `{{ earnings_lines }}` just works.
+        return "\n".join(f"{r['label']}\t{r['amount']}" for r in rows) or "—"
+
+    earnings = lines(payslip.earnings)
+    deductions = lines(payslip.deductions)
+    employer = lines(payslip.employer_contributions)
+
+    # Code-keyed maps so fixed-layout templates can place a specific component
+    # in a specific cell, e.g. {{ amount.BASIC }}, {{ amount.HRA }}, {{ amount.PF }},
+    # {{ amount.TDS }}. Missing codes render as empty (Jinja Undefined).
+    amount: dict[str, str] = {}
+    amount_raw: dict[str, float] = {}
+    for r in earnings + deductions + employer:
+        amount[r["code"]] = r["amount"]
+        amount_raw[r["code"]] = r["amount_raw"]
+
+    addr_parts = []
+    if company:
+        addr_parts = [
+            getattr(company, p, None)
+            for p in ("address_line1", "address_line2", "city", "state", "pincode", "country")
+        ]
+    company_address = ", ".join(p for p in addr_parts if p)
+
+    doj = getattr(employee, "date_of_joining", None) if employee else None
+    return {
+        "company_name": ps.display_name or (company.name if company else "Company"),
+        "company": {
+            "name": company.name if company else "",
+            "legal_name": (getattr(company, "legal_name", None) or "") if company else "",
+            "address": company_address,
+            "city": (getattr(company, "city", None) or "") if company else "",
+            "state": (getattr(company, "state", None) or "") if company else "",
+            "pincode": (getattr(company, "pincode", None) or "") if company else "",
+            "contact_email": (getattr(company, "contact_email", None) or "") if company else "",
+            "contact_phone": (getattr(company, "contact_phone", None) or "") if company else "",
+            "pan": (getattr(company, "pan", None) or "") if company else "",
+            "tan": (getattr(company, "tan", None) or "") if company else "",
+        },
+        "employee": {
+            "name": emp_name,
+            "email": (employee.email if employee else "") or "",
+            "code": (getattr(employee, "employee_id", None) or "") if employee else "",
+            "pan": (getattr(employee, "pan", None) or "") if employee else "",
+            "uan": (getattr(employee, "uan", None) or "") if employee else "",
+            "state": (getattr(employee, "state", None) or "") if employee else "",
+            "date_of_joining": str(doj) if doj else "",
+        },
+        "ref": str(payslip.id)[:8],
+        "status": payslip.status,
+        "currency": cur,
+        "cycle_name": cycle.name,
+        "period_start": str(cycle.period_start),
+        "period_end": str(cycle.period_end),
+        "pay_date": str(cycle.pay_date),
+        "earnings": earnings,
+        "deductions": deductions,
+        "employer_contributions": employer,
+        # Preformatted, multi-line versions for simple templates.
+        "earnings_lines": block(earnings),
+        "deductions_lines": block(deductions),
+        "employer_contributions_lines": block(employer),
+        # Code-keyed amounts for fixed-layout templates.
+        "amount": amount,
+        "amount_raw": amount_raw,
+        "gross": money(payslip.gross_earnings),
+        "total_deductions": money(payslip.total_deductions),
+        "net": money(payslip.net_pay),
+        "gross_raw": float(payslip.gross_earnings),
+        "net_raw": float(payslip.net_pay),
+        "lop_days": float(payslip.lop_days or 0),
+        "paid_days": float(payslip.paid_days or 0),
+        "working_days": int(DEFAULT_WORKING_DAYS),
+    }
+
+
+def _render_payslip_doc(
+    payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
+) -> bytes | None:
+    """Fill the company's uploaded .docx template, or None if there isn't one."""
+    if not company or not company.payslip_doc_template:
+        return None
+    ctx = _docx_context(payslip, cycle, employee, company)
+    return docx_service.render_payslip_docx(company.payslip_doc_template, ctx)
+
+
+def _payslip_pdf_bytes(
+    payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
+) -> bytes:
+    """The payslip PDF: from the uploaded .docx template when one is enabled and
+    a docx->pdf converter is present, else the built-in fpdf2 layout."""
+    ps = PayslipSettings.from_stored(company.payslip_settings if company else None)
+    if company and company.payslip_doc_template and ps.use_doc_template:
+        try:
+            docx_bytes = _render_payslip_doc(payslip, cycle, employee, company)
+            if docx_bytes:
+                pdf = docx_service.docx_to_pdf(docx_bytes)
+                if pdf:
+                    return pdf
+        except Exception:
+            pass  # any template/convert failure -> built-in layout
+    return _render_pdf(payslip, cycle, employee, company)
+
+
 @router.get("/payslips/{id}/pdf")
 async def download_payslip_pdf(
     id: uuid.UUID,
@@ -784,13 +931,48 @@ async def download_payslip_pdf(
     company_id: uuid.UUID = Depends(get_current_company_id),
     _: object = Depends(require_permission(Permission.PAYROLL_READ)),
 ) -> Response:
-    """Download the payslip as a server-rendered PDF (same artifact emailed)."""
+    """Download the payslip as a server-rendered PDF (same artifact emailed).
+
+    Uses the company's uploaded .docx template when enabled and a docx->pdf
+    converter is available; otherwise the built-in layout."""
     payslip, cycle, employee, company = await _gather_payslip(db, id, company_id)
-    pdf = await run_in_threadpool(_render_pdf, payslip, cycle, employee, company)
+    pdf = await run_in_threadpool(_payslip_pdf_bytes, payslip, cycle, employee, company)
     filename = _pdf_filename(cycle, employee, payslip)
     return Response(
         content=pdf,
         media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/payslips/{id}/docx")
+async def download_payslip_docx(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> Response:
+    """Download the payslip as a filled Word document from the company's uploaded
+    template. 404 if no template has been uploaded."""
+    payslip, cycle, employee, company = await _gather_payslip(db, id, company_id)
+    if not company or not company.payslip_doc_template:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No payslip document template has been uploaded.",
+        )
+    try:
+        docx_bytes = await run_in_threadpool(
+            _render_payslip_doc, payslip, cycle, employee, company
+        )
+    except Exception as exc:  # template authoring error (bad token, etc.)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not fill the template: {exc}",
+        )
+    filename = _pdf_filename(cycle, employee, payslip)[:-4] + ".docx"
+    return Response(
+        content=docx_bytes or b"",
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -809,7 +991,7 @@ async def email_payslip(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="This employee has no email address on file.",
         )
-    pdf = await run_in_threadpool(_render_pdf, payslip, cycle, employee, company)
+    pdf = await run_in_threadpool(_payslip_pdf_bytes, payslip, cycle, employee, company)
     company_name = company.name if company else "Croar Payroll"
     html = email_service.payslip_email_html(
         employee_name=f"{employee.first_name} {employee.last_name}".strip(),
