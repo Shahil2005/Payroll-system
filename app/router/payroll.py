@@ -88,6 +88,7 @@ async def create_salary_structure(
         pf_wage_codes=payload.pf_wage_codes,
         esi_enabled=payload.esi_enabled,
         pt_enabled=payload.pt_enabled,
+        tds_enabled=payload.tds_enabled,
     )
     db.add(struct)
     try:

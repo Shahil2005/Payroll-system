@@ -43,6 +43,7 @@ export interface SalaryStructure {
   pf_wage_codes: string[] | null;
   esi_enabled: boolean;
   pt_enabled: boolean;
+  tds_enabled: boolean;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -393,6 +394,85 @@ export const settingsApi = {
   getOrganization: () => apiClient.get<Organization>(`${S}/organization`),
   updateOrganization: (body: OrganizationUpdate) =>
     apiClient.put<Organization>(`${S}/organization`, body),
+};
+
+// --- Taxes & Forms ---------------------------------------------------------
+const T = "/api/v1/enterprise/taxes";
+
+export type TaxRegime = "OLD" | "NEW";
+
+export interface TaxProfile {
+  id: string;
+  company_id: string;
+  employee_id: string;
+  financial_year: string;
+  tax_regime: TaxRegime;
+  declared_80c: number | string;
+  declared_80d: number | string;
+  declared_hra_rent: number | string;
+  declared_home_loan_interest: number | string;
+  declared_other: number | string;
+  prev_employer_income: number | string;
+  prev_employer_tds: number | string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaxProfileUpsert {
+  financial_year?: string;
+  tax_regime: TaxRegime;
+  declared_80c: number;
+  declared_80d: number;
+  declared_hra_rent: number;
+  declared_home_loan_interest: number;
+  declared_other: number;
+  prev_employer_income: number;
+  prev_employer_tds: number;
+}
+
+export interface TdsChallan {
+  id: string;
+  company_id: string;
+  financial_year: string;
+  period_month: string;
+  amount: number | string;
+  challan_number: string;
+  bsr_code: string | null;
+  deposit_date: string;
+  interest: number | string;
+  penalty: number | string;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChallanCreate {
+  financial_year?: string;
+  period_month: string;
+  amount: number;
+  challan_number: string;
+  bsr_code?: string | null;
+  deposit_date: string;
+  interest?: number;
+  penalty?: number;
+  notes?: string | null;
+}
+
+export interface TdsLiabilityRow {
+  period_month: string;
+  tds_deducted: number | string;
+  tds_deposited: number | string;
+  difference: number | string;
+}
+
+export const taxesApi = {
+  listProfiles: () => apiClient.get<TaxProfile[]>(`${T}/profiles`),
+  upsertProfile: (employeeId: string, body: TaxProfileUpsert) =>
+    apiClient.put<TaxProfile>(`${T}/profiles/${employeeId}`, body),
+  listChallans: () => apiClient.get<TdsChallan[]>(`${T}/challans`),
+  createChallan: (body: ChallanCreate) => apiClient.post<TdsChallan>(`${T}/challans`, body),
+  deleteChallan: (id: string) => apiClient.del<TdsChallan>(`${T}/challans/${id}`),
+  tdsLiabilities: () => apiClient.get<TdsLiabilityRow[]>(`${T}/tds-liabilities`),
 };
 
 // --- Audit / activity ------------------------------------------------------

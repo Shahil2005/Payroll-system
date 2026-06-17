@@ -13,10 +13,13 @@ from app.constants import (
     LineType,
     PayrollCycleStatus,
     PayslipStatus,
+    TaxRegime,
 )
 from app.models.employee import Employee
 from app.models.payroll import PayrollAdjustment, PayrollCycle, Payslip, SalaryStructure
+from app.models.taxes import EmployeeTaxProfile
 from app.services import statutory as statutory_rules
+from app.services import tax_engine
 
 
 def _q(amount: Decimal) -> Decimal:
@@ -54,6 +57,8 @@ def compute_payslip(
     *,
     pt_state: str | None = None,
     adjustments: list[dict[str, Any]] | None = None,
+    tds_enabled: bool = False,
+    tax_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Pure payslip calculation (spec §5).
 
@@ -160,6 +165,29 @@ def compute_payslip(
                 {"code": "PT", "label": "Professional Tax", "amount": float(pt["amount"])}
             )
             total_deductions = _q(total_deductions + pt["amount"])
+
+    # --- Income tax (TDS) — opt-in per structure (Phase 2, ESTIMATE) ---
+    # Annual projection uses the stable monthly gross (raw_gross, pre-LOP) x 12
+    # so monthly TDS doesn't swing with LOP. Driven by the employee's IT
+    # declaration; result is snapshotted and added as a deduction line.
+    if tds_enabled:
+        profile = tax_profile or {}
+        tds = tax_engine.compute_tds(
+            annual_gross=_q(raw_gross * Decimal("12")),
+            regime=str(profile.get("tax_regime") or TaxRegime.NEW.value),
+            declarations=profile,
+            prev_employer_income=Decimal(str(profile.get("prev_employer_income") or "0")),
+            prev_employer_tds=Decimal(str(profile.get("prev_employer_tds") or "0")),
+        )
+        statutory["tds"] = {
+            k: (float(v) if isinstance(v, Decimal) else v) for k, v in tds.items()
+        }
+        monthly_tds = tds["monthly_tds"]
+        if monthly_tds > 0:
+            deductions.append(
+                {"code": "TDS", "label": "TDS (Income Tax, est.)", "amount": float(monthly_tds)}
+            )
+            total_deductions = _q(total_deductions + monthly_tds)
 
     # --- Per-run adjustments (one-time earnings/deductions for THIS cycle) ---
     # Flat amounts layered on top of the structure result; see the docstring.
@@ -362,6 +390,29 @@ async def run_payroll(
             {"kind": adj.kind, "code": adj.code, "label": adj.label, "amount": adj.amount}
         )
 
+    # Employee IT declarations (for TDS estimation), keyed by employee.
+    tax_profiles = (
+        await db.execute(
+            select(EmployeeTaxProfile).where(
+                EmployeeTaxProfile.company_id == company_id,
+                EmployeeTaxProfile.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    tax_profile_by_employee: dict[uuid.UUID, dict[str, Any]] = {
+        p.employee_id: {
+            "tax_regime": p.tax_regime,
+            "declared_80c": p.declared_80c,
+            "declared_80d": p.declared_80d,
+            "declared_hra_rent": p.declared_hra_rent,
+            "declared_home_loan_interest": p.declared_home_loan_interest,
+            "declared_other": p.declared_other,
+            "prev_employer_income": p.prev_employer_income,
+            "prev_employer_tds": p.prev_employer_tds,
+        }
+        for p in tax_profiles
+    }
+
     created_count = 0
     updated_count = 0
     skipped: list[dict[str, Any]] = []
@@ -403,6 +454,8 @@ async def run_payroll(
                 working_days,
                 pt_state=employee.state,
                 adjustments=adjustments_by_employee.get(employee.id),
+                tds_enabled=bool(struct.tds_enabled),
+                tax_profile=tax_profile_by_employee.get(employee.id),
             )
         except ValueError as exc:
             skipped.append({"employee_id": employee.id, "reason": str(exc)})

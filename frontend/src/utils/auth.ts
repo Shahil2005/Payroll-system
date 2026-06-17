@@ -67,6 +67,7 @@ export const routePermissions: ReadonlyArray<{
   { prefix: "/enterprise/payroll/structures", permission: "payroll:read" },
   { prefix: "/enterprise/payroll", permission: "payroll:read" },
   { prefix: "/enterprise/employees", permission: "payroll:read" },
+  { prefix: "/enterprise/taxes", permission: "payroll:read" },
   { prefix: "/enterprise/reports", permission: "payroll:read" },
   { prefix: "/enterprise/activity", permission: "payroll:read" },
   { prefix: "/enterprise/team", permission: "users:manage" },

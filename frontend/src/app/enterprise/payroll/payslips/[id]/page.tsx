@@ -161,6 +161,32 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
           <Info label="Paid Days" value={String(Number(slip.paid_days ?? 0))} center />
         </div>
 
+        {(() => {
+          const tds = (slip.statutory as Record<string, unknown> | null)?.tds as
+            | Record<string, number | string>
+            | undefined;
+          if (!tds) return null;
+          return (
+            <div className="mt-6 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <h4 className="font-bold">Income Tax (TDS) — estimate</h4>
+                <span className="text-xs text-[var(--color-muted)]">
+                  {tds.regime} regime · {String(tds.version)}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+                <TaxRow label="Projected annual income" value={inr(tds.total_income, slip.currency)} />
+                <TaxRow label="Taxable income" value={inr(tds.taxable_income, slip.currency)} />
+                <TaxRow label="Estimated annual tax" value={inr(tds.annual_tax, slip.currency)} />
+                <TaxRow label="Monthly TDS" value={inr(tds.monthly_tds, slip.currency)} />
+              </div>
+              <p className="mt-2 text-xs text-[var(--color-muted)]">
+                Estimate only — not a tax certificate. HRA exemption and surcharge are not modelled.
+              </p>
+            </div>
+          );
+        })()}
+
         <div className="mt-6 flex items-center justify-between border-t border-[var(--color-border)] pt-5">
           <span className="text-sm text-[var(--color-muted)]">Net Payable</span>
           <span className="text-3xl font-extrabold text-[var(--color-accent)]">{inr(slip.net_pay, slip.currency)}</span>
@@ -171,6 +197,15 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
 }
 
 const DEFAULT_WD = 30;
+
+function TaxRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-[var(--color-muted)]">{label}</span>
+      <span className="font-medium">{value}</span>
+    </div>
+  );
+}
 
 function Info({ label, value, center = false }: { label: string; value: string; center?: boolean }) {
   return (

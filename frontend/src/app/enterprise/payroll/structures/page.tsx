@@ -85,6 +85,7 @@ export default function StructuresPage() {
   const [pfCap, setPfCap] = useState(true);
   const [esiEnabled, setEsiEnabled] = useState(false);
   const [ptEnabled, setPtEnabled] = useState(false);
+  const [tdsEnabled, setTdsEnabled] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -132,6 +133,7 @@ export default function StructuresPage() {
     setPfCap(true);
     setEsiEnabled(false);
     setPtEnabled(false);
+    setTdsEnabled(false);
     setFormErr(null);
     setOpen(true);
   }
@@ -150,6 +152,7 @@ export default function StructuresPage() {
     setPfCap(s.pf_cap_at_ceiling ?? true);
     setEsiEnabled(s.esi_enabled ?? false);
     setPtEnabled(s.pt_enabled ?? false);
+    setTdsEnabled(s.tds_enabled ?? false);
     setFormErr(null);
     setOpen(true);
   }
@@ -174,6 +177,7 @@ export default function StructuresPage() {
       pf_cap_at_ceiling: pfCap,
       esi_enabled: esiEnabled,
       pt_enabled: ptEnabled,
+      tds_enabled: tdsEnabled,
     };
     setSaving(true);
     try {
@@ -371,6 +375,16 @@ export default function StructuresPage() {
                   <input type="checkbox" checked={ptEnabled} onChange={(e) => setPtEnabled(e.target.checked)} />
                   <span>Professional Tax — by the employee&apos;s state</span>
                 </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={tdsEnabled} onChange={(e) => setTdsEnabled(e.target.checked)} />
+                  <span>Income Tax (TDS) — estimated from the employee&apos;s IT declaration</span>
+                </label>
+                {tdsEnabled && (
+                  <p className="ml-6 text-xs text-[var(--color-muted)]">
+                    Set the employee&apos;s regime &amp; declarations under Taxes &amp; Forms. TDS is an
+                    estimate, not filing-grade.
+                  </p>
+                )}
               </div>
               <p className="mt-3 text-xs text-[var(--color-muted)]">
                 Statutory amounts are calculated at run time and shown as locked lines on the payslip —

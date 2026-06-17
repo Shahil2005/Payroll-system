@@ -15,6 +15,7 @@ from app.router.employee import router as employee_router
 from app.router.payroll import router as payroll_router
 from app.router.reports import router as reports_router
 from app.router.settings import router as settings_router
+from app.router.taxes import router as taxes_router
 from app.services import audit_service
 
 _settings = Settings()
@@ -105,4 +106,5 @@ app.include_router(payroll_router)
 app.include_router(employee_router)
 app.include_router(reports_router)
 app.include_router(settings_router)
+app.include_router(taxes_router)
 app.include_router(audit_router)

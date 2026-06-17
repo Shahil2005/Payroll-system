@@ -67,6 +67,8 @@ def _reset_db() -> None:
     conn = psycopg2.connect(_DSN)
     conn.autocommit = True
     cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE tds_challans CASCADE;")
+    cur.execute("TRUNCATE TABLE employee_tax_profiles CASCADE;")
     cur.execute("TRUNCATE TABLE payslips CASCADE;")
     cur.execute("TRUNCATE TABLE salary_structures CASCADE;")
     cur.execute("TRUNCATE TABLE payroll_cycles CASCADE;")
@@ -141,6 +143,8 @@ def db_setup() -> Generator[None, None, None]:
     conn = psycopg2.connect(_DSN)
     conn.autocommit = True
     cur = conn.cursor()
+    cur.execute("TRUNCATE TABLE tds_challans CASCADE;")
+    cur.execute("TRUNCATE TABLE employee_tax_profiles CASCADE;")
     cur.execute("TRUNCATE TABLE payslips CASCADE;")
     cur.execute("TRUNCATE TABLE salary_structures CASCADE;")
     cur.execute("TRUNCATE TABLE payroll_cycles CASCADE;")
@@ -718,6 +722,185 @@ def test_organization_update_is_admin_only() -> None:
             "/api/v1/enterprise/settings/organization", json={"name": "Hacked"}
         )
         assert resp.status_code == status.HTTP_403_FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# Taxes & Forms — IT declarations + TDS challans
+# ---------------------------------------------------------------------------
+def test_tax_profile_upsert_and_list() -> None:
+    with authed_client() as c:
+        assert c.get("/api/v1/enterprise/taxes/profiles").json() == []
+
+        r = c.put(
+            f"/api/v1/enterprise/taxes/profiles/{EMP1}",
+            json={
+                "tax_regime": "OLD",
+                "declared_80c": 150000,
+                "declared_80d": 25000,
+                "prev_employer_income": 300000,
+            },
+        )
+        assert r.status_code == status.HTTP_200_OK, r.text
+        body = r.json()
+        assert body["tax_regime"] == "OLD"
+        assert float(body["declared_80c"]) == 150000.0
+        assert body["employee_id"] == EMP1
+
+        # Upsert replaces (one profile per employee).
+        r2 = c.put(
+            f"/api/v1/enterprise/taxes/profiles/{EMP1}",
+            json={"tax_regime": "NEW", "declared_80c": 0},
+        )
+        assert r2.json()["tax_regime"] == "NEW"
+        profiles = c.get("/api/v1/enterprise/taxes/profiles").json()
+        assert len(profiles) == 1 and profiles[0]["employee_id"] == EMP1
+
+
+def test_tax_profile_unknown_employee_404() -> None:
+    with authed_client() as c:
+        r = c.put(
+            "/api/v1/enterprise/taxes/profiles/99999999-9999-9999-9999-999999999999",
+            json={"tax_regime": "NEW"},
+        )
+        assert r.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_tds_challan_crud() -> None:
+    with authed_client() as c:
+        assert c.get("/api/v1/enterprise/taxes/challans").json() == []
+        r = c.post(
+            "/api/v1/enterprise/taxes/challans",
+            json={
+                "period_month": "2026-04",
+                "amount": 50000,
+                "challan_number": "CIN12345",
+                "bsr_code": "0510308",
+                "deposit_date": "2026-05-07",
+            },
+        )
+        assert r.status_code == status.HTTP_201_CREATED, r.text
+        challan_id = r.json()["id"]
+
+        listed = c.get("/api/v1/enterprise/taxes/challans").json()
+        assert len(listed) == 1 and listed[0]["challan_number"] == "CIN12345"
+
+        assert c.delete(
+            f"/api/v1/enterprise/taxes/challans/{challan_id}"
+        ).status_code == status.HTTP_200_OK
+        assert c.get("/api/v1/enterprise/taxes/challans").json() == []
+
+
+def test_taxes_are_write_protected_for_viewer() -> None:
+    with authed_client(VIEWER) as c:
+        assert c.get("/api/v1/enterprise/taxes/challans").status_code == status.HTTP_200_OK
+        assert c.post(
+            "/api/v1/enterprise/taxes/challans",
+            json={
+                "period_month": "2026-04",
+                "amount": 1,
+                "challan_number": "X",
+                "deposit_date": "2026-05-07",
+            },
+        ).status_code == status.HTTP_403_FORBIDDEN
+        assert c.put(
+            f"/api/v1/enterprise/taxes/profiles/{EMP1}", json={"tax_regime": "NEW"}
+        ).status_code == status.HTTP_403_FORBIDDEN
+
+
+# ---------------------------------------------------------------------------
+# Income tax (TDS) engine + integration
+# ---------------------------------------------------------------------------
+def test_tds_engine_regimes() -> None:
+    from app.services import tax_engine
+
+    # New regime: taxable 11.25L < 12L rebate -> nil tax.
+    r = tax_engine.compute_tds(annual_gross=Decimal("1200000"), regime="NEW")
+    assert float(r["annual_tax"]) == 0.0
+    # New regime, higher income -> positive monthly TDS.
+    r2 = tax_engine.compute_tds(annual_gross=Decimal("2400000"), regime="NEW")
+    assert float(r2["monthly_tds"]) > 0
+    # Old regime deductions reduce taxable income.
+    base = tax_engine.compute_tds(annual_gross=Decimal("1500000"), regime="OLD")
+    with_80c = tax_engine.compute_tds(
+        annual_gross=Decimal("1500000"), regime="OLD", declarations={"declared_80c": 150000}
+    )
+    assert float(with_80c["taxable_income"]) < float(base["taxable_income"])
+
+
+_TDS_COMPONENTS = [
+    {"code": "BASIC", "label": "Basic", "type": "fixed", "amount": 120000},
+    {"code": "HRA", "label": "HRA", "type": "fixed", "amount": 50000},
+    {"code": "SPL", "label": "Special", "type": "fixed", "amount": 30000},
+]
+
+
+def test_tds_deducted_on_payslip_when_enabled() -> None:
+    with authed_client() as c:
+        _create_structure(
+            c, employee_id=EMP1, tds_enabled=True,
+            components=_TDS_COMPONENTS, default_deductions=[],
+        )
+        cid = _create_cycle(c)["id"]
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+        slips = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()
+        slip = next(s for s in slips if s["employee_id"] == EMP1)
+        detail = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}").json()
+        tds_lines = [d for d in detail["deductions"] if d["code"] == "TDS"]
+        assert len(tds_lines) == 1 and float(tds_lines[0]["amount"]) > 0
+        assert detail["statutory"]["tds"]["regime"] == "NEW"
+
+
+def test_tds_declaration_changes_payslip() -> None:
+    """Switching an employee to OLD regime with 80C changes the TDS amount."""
+    with authed_client() as c:
+        _create_structure(
+            c, employee_id=EMP1, tds_enabled=True,
+            components=_TDS_COMPONENTS, default_deductions=[],
+        )
+        c.put(
+            f"/api/v1/enterprise/taxes/profiles/{EMP1}",
+            json={"tax_regime": "OLD", "declared_80c": 150000, "declared_home_loan_interest": 200000},
+        )
+        cid = _create_cycle(c)["id"]
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/approve")
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/mark-paid")
+        slips = c.get(f"/api/v1/enterprise/payroll/cycles/{cid}/payslips").json()
+        detail = c.get(
+            f"/api/v1/enterprise/payroll/payslips/{slips[0]['id']}"
+        ).json()
+        assert detail["statutory"]["tds"]["regime"] == "OLD"
+        assert float(detail["statutory"]["tds"]["declared_deductions"]) == 350000.0
+
+
+def test_tds_liabilities_reconciliation() -> None:
+    with authed_client() as c:
+        _create_structure(
+            c, employee_id=EMP1, tds_enabled=True,
+            components=_TDS_COMPONENTS, default_deductions=[],
+        )
+        cid = _create_cycle(c)["id"]  # period June 2026
+        c.post(f"/api/v1/enterprise/payroll/cycles/{cid}/run")
+
+        libs = c.get("/api/v1/enterprise/taxes/tds-liabilities").json()
+        june = next(row for row in libs if row["period_month"] == "2026-06")
+        assert float(june["tds_deducted"]) > 0
+        assert float(june["tds_deposited"]) == 0.0
+
+        c.post(
+            "/api/v1/enterprise/taxes/challans",
+            json={
+                "period_month": "2026-06",
+                "amount": june["tds_deducted"],
+                "challan_number": "RECON1",
+                "deposit_date": "2026-07-07",
+            },
+        )
+        libs2 = c.get("/api/v1/enterprise/taxes/tds-liabilities").json()
+        june2 = next(row for row in libs2 if row["period_month"] == "2026-06")
+        assert float(june2["difference"]) == 0.0
 
 
 # ---------------------------------------------------------------------------

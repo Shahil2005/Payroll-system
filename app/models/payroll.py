@@ -55,6 +55,9 @@ class SalaryStructure(Base, TimestampMixin):
     pf_wage_codes: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True, default=None)
     esi_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     pt_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
+    # Income tax (TDS) — Phase 2. Opt-in; when on, an estimated monthly TDS is
+    # computed from the employee's IT declaration and deducted on the payslip.
+    tds_enabled: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
 
     employee: Mapped["Employee"] = relationship(back_populates="salary_structures")
 

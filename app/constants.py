@@ -42,6 +42,21 @@ class PayFrequency(str, Enum):
     WEEKLY = "WEEKLY"
 
 
+class TaxRegime(str, Enum):
+    """India income-tax regime for TDS. NEW is the statutory default since
+    FY 2023-24. Stored on the employee tax profile; consumed by a future TDS
+    engine (not yet built — see statutory.py)."""
+
+    OLD = "OLD"
+    NEW = "NEW"
+
+
+# Current financial year (Apr–Mar) used as the default for tax profiles and TDS
+# challans. A literal (not computed) since Date.now() is unavailable in some
+# contexts; bump when the FY rolls over.
+DEFAULT_FINANCIAL_YEAR = "2026-27"
+
+
 class AdjustmentKind(str, Enum):
     """A per-cycle, one-time pay line (not stored on the salary structure).
 

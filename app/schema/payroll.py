@@ -69,6 +69,7 @@ class SalaryStructureBase(BaseModel):
     )
     esi_enabled: bool = Field(default=False, description="Compute ESI when within wage limit")
     pt_enabled: bool = Field(default=False, description="Compute Professional Tax by employee state")
+    tds_enabled: bool = Field(default=False, description="Estimate & deduct monthly income tax (TDS)")
 
 
 class SalaryStructureCreate(SalaryStructureBase):
@@ -89,6 +90,7 @@ class SalaryStructureUpdate(BaseModel):
     pf_wage_codes: list[str] | None = None
     esi_enabled: bool | None = None
     pt_enabled: bool | None = None
+    tds_enabled: bool | None = None
 
 
 class SalaryStructureOut(SalaryStructureBase):
