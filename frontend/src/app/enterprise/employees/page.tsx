@@ -44,6 +44,10 @@ export default function EmployeesPage() {
     last_name: "",
     email: "",
     employee_id: "",
+    designation: "",
+    department: "",
+    location: "",
+    bank_account_no: "",
     pan: "",
     uan: "",
     esic_number: "",
@@ -77,6 +81,10 @@ export default function EmployeesPage() {
         last_name: form.last_name,
         email: form.email,
         employee_id: form.employee_id || null,
+        designation: form.designation || null,
+        department: form.department || null,
+        location: form.location || null,
+        bank_account_no: form.bank_account_no || null,
         pan: form.pan || null,
         uan: form.uan || null,
         esic_number: form.esic_number || null,
@@ -89,6 +97,10 @@ export default function EmployeesPage() {
         last_name: "",
         email: "",
         employee_id: "",
+        designation: "",
+        department: "",
+        location: "",
+        bank_account_no: "",
         pan: "",
         uan: "",
         esic_number: "",
@@ -231,6 +243,30 @@ export default function EmployeesPage() {
 
             <div className="mt-1 border-t border-[var(--color-border)] pt-3">
               <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                Job details (shown on payslips)
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">Designation</span>
+                  <input className="input" maxLength={120} value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">Department</span>
+                  <input className="input" maxLength={120} value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">Location</span>
+                  <input className="input" maxLength={120} value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5">
+                  <span className="lbl">Bank Account No</span>
+                  <input className="input" maxLength={34} value={form.bank_account_no} onChange={(e) => setForm({ ...form, bank_account_no: e.target.value })} />
+                </label>
+              </div>
+            </div>
+
+            <div className="mt-1 border-t border-[var(--color-border)] pt-3">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                 Statutory details (for PF / ESI / Professional Tax)
               </p>
               <div className="grid grid-cols-2 gap-4">
@@ -312,6 +348,10 @@ export default function EmployeesPage() {
                 Statutory & Profile
               </p>
               <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                <DetailRow label="Designation" value={detail.designation} />
+                <DetailRow label="Department" value={detail.department} />
+                <DetailRow label="Location" value={detail.location} />
+                <DetailRow label="Bank Account No" value={detail.bank_account_no} mono />
                 <DetailRow label="PAN" value={detail.pan} mono />
                 <DetailRow label="State (PT)" value={stateLabel(detail.state)} />
                 <DetailRow label="UAN (PF)" value={detail.uan} mono />

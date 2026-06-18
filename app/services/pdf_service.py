@@ -211,6 +211,22 @@ def render_payslip_pdf(
     return bytes(pdf.output())
 
 
+def render_template_html_pdf(html_body: str, footer_note: str | None = None) -> bytes:
+    """Render an HTML fragment (from a company's .docx template, via
+    ``docx_service.docx_to_html``) to PDF using fpdf2's HTML engine.
+
+    This is the LibreOffice-free path for template-based PDFs: the same HTML that
+    drives the on-screen/print payslip also produces the downloaded/emailed PDF,
+    so they match. Core fonts are latin-1 only, hence the sanitisation."""
+    pdf = _PayslipPDF(format="A4")
+    pdf.footer_note = _latin1((footer_note or "").strip()) or _DEFAULT_FOOTER
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "", 11)
+    pdf.write_html(_latin1(html_body))
+    return bytes(pdf.output())
+
+
 def _hr(pdf: FPDF) -> None:
     pdf.set_draw_color(*_LINE)
     y = pdf.get_y()

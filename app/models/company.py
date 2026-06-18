@@ -69,3 +69,9 @@ class Company(Base, TimestampMixin):
     # filling this template instead of the built-in layout.
     payslip_doc_template: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     payslip_doc_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # When the template was produced by the "smart mapping" wizard, we keep the
+    # admin's ORIGINAL upload (token-free) here so they can re-run the wizard,
+    # plus the confirmed {slot_index: token} mapping for display. The token-filled
+    # result lives in payslip_doc_template above (what generation actually uses).
+    payslip_doc_original: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    payslip_doc_mapping: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

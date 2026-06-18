@@ -7,6 +7,8 @@ import {
   type Organization,
   type OrganizationUpdate,
   type PayslipSettings,
+  type PayslipDocScan,
+  type PayslipDocSlot,
   type StatutoryConfig,
   type StatutoryConfigUpdate,
 } from "@/utils/api";
@@ -29,7 +31,34 @@ const INDUSTRIES = [
   "Other",
 ];
 
-const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD"];
+// Common ISO-4217 currencies offered out of the box. Users can still enter any
+// code via the "Custom…" option below.
+const CURRENCIES: { code: string; label: string }[] = [
+  { code: "INR", label: "Indian Rupee" },
+  { code: "USD", label: "US Dollar" },
+  { code: "EUR", label: "Euro" },
+  { code: "GBP", label: "British Pound" },
+  { code: "AED", label: "UAE Dirham" },
+  { code: "SGD", label: "Singapore Dollar" },
+  { code: "AUD", label: "Australian Dollar" },
+  { code: "CAD", label: "Canadian Dollar" },
+  { code: "JPY", label: "Japanese Yen" },
+  { code: "CNY", label: "Chinese Yuan" },
+  { code: "CHF", label: "Swiss Franc" },
+  { code: "HKD", label: "Hong Kong Dollar" },
+  { code: "NZD", label: "New Zealand Dollar" },
+  { code: "ZAR", label: "South African Rand" },
+  { code: "SAR", label: "Saudi Riyal" },
+  { code: "QAR", label: "Qatari Riyal" },
+  { code: "MYR", label: "Malaysian Ringgit" },
+  { code: "THB", label: "Thai Baht" },
+  { code: "IDR", label: "Indonesian Rupiah" },
+  { code: "PHP", label: "Philippine Peso" },
+  { code: "LKR", label: "Sri Lankan Rupee" },
+  { code: "BDT", label: "Bangladeshi Taka" },
+  { code: "NPR", label: "Nepalese Rupee" },
+];
+const CUSTOM_CURRENCY = "__custom__";
 
 // All form values are kept as strings (nulls from the API are coerced to "").
 type OrgField =
@@ -94,6 +123,9 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [tab, setTab] = useState<TabKey>("organisation");
+  // True once the user picks "Custom…" so the input stays visible even while
+  // the typed code is empty or partially typed.
+  const [customCurrency, setCustomCurrency] = useState(false);
 
   useEffect(() => {
     settingsApi
@@ -102,6 +134,10 @@ export default function SettingsPage() {
         const next = toFormState(o as Partial<Record<OrgField, unknown>>);
         setForm(next);
         setInitial(next);
+        // Saved a code that isn't one of the presets → start in custom mode.
+        if (next.currency && !CURRENCIES.some((c) => c.code === next.currency)) {
+          setCustomCurrency(true);
+        }
       })
       .catch((err) => setError((err as Error).message))
       .finally(() => setLoading(false));
@@ -250,18 +286,44 @@ export default function SettingsPage() {
               </select>
             </Field>
             <Field label="Currency">
-              <select
-                className="input"
-                disabled={!canEdit}
-                value={form.currency}
-                onChange={(e) => set("currency", e.target.value)}
-              >
-                {CURRENCIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              <div className="flex flex-col gap-2">
+                <select
+                  className="input"
+                  disabled={!canEdit}
+                  value={customCurrency ? CUSTOM_CURRENCY : form.currency}
+                  onChange={(e) => {
+                    if (e.target.value === CUSTOM_CURRENCY) {
+                      // Enter custom mode and clear the value so the user types
+                      // their own code; the input below stays visible.
+                      setCustomCurrency(true);
+                      set("currency", "");
+                    } else {
+                      setCustomCurrency(false);
+                      set("currency", e.target.value);
+                    }
+                  }}
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.code} — {c.label}
+                    </option>
+                  ))}
+                  <option value={CUSTOM_CURRENCY}>Custom…</option>
+                </select>
+                {customCurrency && (
+                  <input
+                    className="input"
+                    autoFocus
+                    maxLength={8}
+                    placeholder="Enter currency code (e.g. KWD)"
+                    disabled={!canEdit}
+                    value={form.currency}
+                    onChange={(e) =>
+                      set("currency", e.target.value.toUpperCase())
+                    }
+                  />
+                )}
+              </div>
             </Field>
           </div>
         </Section>
@@ -641,6 +703,8 @@ const PAYSLIP_BLANK: PayslipSettings = {
   company_name: "",
   has_doc_template: false,
   doc_filename: null,
+  doc_mapped: false,
+  doc_has_tokens: false,
 };
 
 function PayslipTemplateSection({ canEdit }: { canEdit: boolean }) {
@@ -650,6 +714,59 @@ function PayslipTemplateSection({ canEdit }: { canEdit: boolean }) {
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  // Smart mapping wizard state. `scan` non-null means the wizard is open;
+  // `mapping` is slot-index -> chosen token (built from the auto-detected
+  // suggestions, editable by the admin).
+  const [scan, setScan] = useState<PayslipDocScan | null>(null);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  function startWizard(s: PayslipDocScan) {
+    const init: Record<string, string> = {};
+    for (const slot of s.slots) {
+      if (slot.suggested_token) init[String(slot.index)] = slot.suggested_token;
+    }
+    setMapping(init);
+    setScan(s);
+  }
+
+  async function scanDoc(file: File) {
+    setErr(null);
+    setBusy(true);
+    try {
+      startWizard(await settingsApi.scanPayslipDocument(file));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function editMapping() {
+    setErr(null);
+    setBusy(true);
+    try {
+      startWizard(await settingsApi.getPayslipMapping());
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyMapping() {
+    setErr(null);
+    setBusy(true);
+    try {
+      applySettings(await settingsApi.applyPayslipMapping(mapping));
+      setScan(null);
+      setSaved(true);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   function applySettings(s: PayslipSettings) {
     setPs({
@@ -828,10 +945,12 @@ function PayslipTemplateSection({ canEdit }: { canEdit: boolean }) {
         <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
           <div className="mb-1 flex items-center gap-2">
             <span className="material-symbols-outlined text-[20px] text-[var(--color-primary)]">description</span>
-            <span className="font-semibold">Custom Word (.docx) template</span>
+            <span className="font-semibold">Advanced: pre-tokenised Word (.docx) template</span>
           </div>
           <p className="mb-2 text-xs text-[var(--color-muted)]">
-            Upload a Word document with placeholder tokens; payslips are generated by filling it.
+            Already added <code>{"{{ tokens }}"}</code> yourself? Upload it here. Otherwise use the
+            smart mapping wizard below instead — it adds the tokens for you.
+            Payslips are generated by filling the document.
             <strong> Blank lines won&apos;t fill</strong> — you must use tokens. Common ones:{" "}
             <code>{"{{ company_name }}"}</code>, <code>{"{{ employee.name }}"}</code>,{" "}
             <code>{"{{ employee.code }}"}</code>, <code>{"{{ period_start }}"}</code>,{" "}
@@ -873,6 +992,18 @@ function PayslipTemplateSection({ canEdit }: { canEdit: boolean }) {
             <p className="text-sm text-[var(--color-muted)]">No template uploaded — the built-in layout is used.</p>
           )}
 
+          {ps.has_doc_template && !ps.doc_has_tokens && (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 px-3 py-2.5 text-sm text-[var(--color-danger)]">
+              <span className="material-symbols-outlined text-[20px]">warning</span>
+              <span>
+                This template has <strong>no fillable fields</strong>, so payslips will show the
+                layout but <strong>no data</strong>. Use{" "}
+                <strong>&ldquo;Map your own template&rdquo;</strong> below to map each row to a
+                payroll field — that adds the fields for you.
+              </span>
+            </div>
+          )}
+
           {canEdit && (
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <label className="cursor-pointer rounded-lg border border-[var(--color-border)] bg-[var(--color-hover)] px-3 py-2 text-sm font-semibold hover:bg-[var(--color-card)]">
@@ -902,6 +1033,57 @@ function PayslipTemplateSection({ canEdit }: { canEdit: boolean }) {
           )}
         </div>
 
+        {/* Smart mapping wizard — upload YOUR template, map fields, no tokens */}
+        <div className="rounded-xl border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-4">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="material-symbols-outlined text-[20px] text-[var(--color-primary)]">auto_fix_high</span>
+            <span className="font-semibold">Map your own template (recommended)</span>
+          </div>
+          <p className="mb-3 text-xs text-[var(--color-muted)]">
+            Upload your company&apos;s existing payslip Word document — no tokens needed. We
+            scan it for labels like <em>Basic</em>, <em>Net Pay</em> and <em>Employee Name</em>,
+            and let you map each to the right payroll field. We then fill it automatically every
+            payroll run.
+          </p>
+
+          {ps.doc_mapped && (
+            <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] px-3 py-2">
+              <span className="material-symbols-outlined text-[20px] text-[var(--color-accent)]">link</span>
+              <span className="min-w-0 flex-1 truncate text-sm">
+                Mapped from <strong>{ps.doc_filename || "your template"}</strong>
+              </span>
+              {canEdit && (
+                <button
+                  type="button"
+                  onClick={editMapping}
+                  disabled={busy}
+                  className="rounded-md px-2.5 py-1 text-xs font-semibold text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10"
+                >
+                  Edit mapping
+                </button>
+              )}
+            </div>
+          )}
+
+          {canEdit && (
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[var(--color-primary)]/40 bg-[var(--color-card)] px-3 py-2 text-sm font-semibold text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10">
+              <span className="material-symbols-outlined text-[18px]">upload_file</span>
+              {busy ? "Scanning…" : ps.doc_mapped ? "Re-scan / replace template…" : "Upload my payslip template…"}
+              <input
+                type="file"
+                accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                className="hidden"
+                disabled={busy}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) scanDoc(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+          )}
+        </div>
+
         {canEdit && (
           <div className="flex justify-end pt-2">
             <button type="submit" disabled={saving} style={{ width: "auto" }} className="btn-primary px-6">
@@ -910,6 +1092,17 @@ function PayslipTemplateSection({ canEdit }: { canEdit: boolean }) {
           </div>
         )}
       </Section>
+
+      {scan && (
+        <MappingWizard
+          scan={scan}
+          mapping={mapping}
+          busy={busy}
+          onChange={setMapping}
+          onCancel={() => setScan(null)}
+          onApply={applyMapping}
+        />
+      )}
     </form>
   );
 }
@@ -941,6 +1134,140 @@ function PayslipToggle({
         onChange={(e) => onChange(e.target.checked)}
       />
     </label>
+  );
+}
+
+// Modal wizard: review the auto-detected slots and map each to a payroll field.
+function MappingWizard({
+  scan,
+  mapping,
+  busy,
+  onChange,
+  onCancel,
+  onApply,
+}: {
+  scan: PayslipDocScan;
+  mapping: Record<string, string>;
+  busy: boolean;
+  onChange: (m: Record<string, string>) => void;
+  onCancel: () => void;
+  onApply: () => void;
+}) {
+  const groups = Array.from(new Set(scan.fields.map((f) => f.group)));
+  const mappedCount = Object.values(mapping).filter(Boolean).length;
+  const fieldLabel = (key: string) =>
+    scan.fields.find((f) => f.key === key)?.label ?? key;
+
+  function setSlot(index: number, token: string) {
+    const next = { ...mapping };
+    if (token) next[String(index)] = token;
+    else delete next[String(index)];
+    onChange(next);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] px-5 py-4">
+          <div className="min-w-0">
+            <h3 className="text-lg font-bold">Map your template fields</h3>
+            <p className="truncate text-xs text-[var(--color-muted)]">
+              {scan.filename} · {scan.slots.length} field
+              {scan.slots.length === 1 ? "" : "s"} detected
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md p-1 text-[var(--color-muted)] hover:bg-[var(--color-hover)]"
+            aria-label="Close"
+          >
+            <span className="material-symbols-outlined text-[22px]">close</span>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {scan.slots.length === 0 ? (
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-4 text-sm text-[var(--color-muted)]">
+              We couldn&apos;t find any recognisable label/value slots in this document.
+              The wizard works best with a <strong>table</strong> of labels and values
+              (e.g. <em>Basic | 0.00</em>) or <em>Label: value</em> lines. Try adjusting
+              your template, or use the manual token upload above.
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <p className="mb-1 text-xs text-[var(--color-muted)]">
+                For each detected line, pick which payroll value should fill it. Leave as
+                <strong> Ignore</strong> to keep whatever is already in the document.
+              </p>
+              {scan.slots.map((slot: PayslipDocSlot) => {
+                const value = mapping[String(slot.index)] || "";
+                return (
+                  <div
+                    key={slot.index}
+                    className="grid grid-cols-1 items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 sm:grid-cols-[1fr_auto]"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">
+                        {slot.label || <span className="italic text-[var(--color-muted)]">(blank)</span>}
+                      </div>
+                      <div className="truncate text-xs text-[var(--color-muted)]">
+                        {slot.context}
+                        {slot.current ? ` → ${slot.current}` : ""}
+                      </div>
+                    </div>
+                    <select
+                      className="input sm:w-64"
+                      value={value}
+                      onChange={(e) => setSlot(slot.index, e.target.value)}
+                      title={value ? fieldLabel(value) : "Ignore"}
+                    >
+                      <option value="">— Ignore —</option>
+                      {groups.map((g) => (
+                        <optgroup key={g} label={g}>
+                          {scan.fields
+                            .filter((f) => f.group === g)
+                            .map((f) => (
+                              <option key={f.key} value={f.key}>
+                                {f.label}
+                              </option>
+                            ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 border-t border-[var(--color-border)] px-5 py-4">
+          <span className="text-xs text-[var(--color-muted)]">
+            {mappedCount} field{mappedCount === 1 ? "" : "s"} mapped
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--color-hover)]"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onApply}
+              disabled={busy || mappedCount === 0}
+              className="btn-primary px-5"
+              style={{ width: "auto" }}
+            >
+              {busy ? "Applying…" : "Apply mapping"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

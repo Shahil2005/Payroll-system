@@ -21,6 +21,8 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
   const [cycle, setCycle] = useState<PayrollCycle | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [tpl, setTpl] = useState<PayslipSettings | null>(null);
+  // HTML rendered from the company's uploaded template, when one is enabled.
+  const [templateHtml, setTemplateHtml] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -78,6 +80,13 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
         setCycle(c);
         setEmployee(emps.find((e) => e.id === p.employee_id) ?? null);
         setTpl(settings);
+        // If a custom template is enabled, render the payslip from it.
+        if (settings?.use_doc_template && settings?.has_doc_template) {
+          const preview = await payrollApi
+            .getPayslipPreviewHtml(id)
+            .catch(() => null);
+          setTemplateHtml(preview?.html ?? null);
+        }
       } catch (err) {
         setError((err as Error).message);
       } finally {
@@ -149,6 +158,20 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
         </div>
       )}
 
+      {templateHtml ? (
+        <div className="mx-auto w-full max-w-3xl rounded-2xl border border-[var(--color-border)] bg-white p-8 text-black print:border-0 print:p-0">
+          {/* Rendered from the company's uploaded payslip template. */}
+          <div
+            className="payslip-template"
+            dangerouslySetInnerHTML={{ __html: templateHtml }}
+          />
+          <style>{`
+            .payslip-template table { width: 100%; border-collapse: collapse; margin: 6px 0; }
+            .payslip-template td, .payslip-template th { border: 1px solid #d1d5db; padding: 4px 8px; vertical-align: top; }
+            .payslip-template p { margin: 4px 0; }
+          `}</style>
+        </div>
+      ) : (
       <div className="mx-auto w-full max-w-3xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-8 print:border-0">
         <div className="mb-6 flex items-start justify-between border-b border-[var(--color-border)] pb-5">
           <div className="flex flex-col gap-1.5">
@@ -241,6 +264,7 @@ export default function PayslipDetail({ params }: { params: Promise<{ id: string
           </p>
         )}
       </div>
+      )}
     </div>
   );
 }

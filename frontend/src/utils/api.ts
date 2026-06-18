@@ -169,6 +169,11 @@ export interface Employee {
   last_name: string;
   email: string;
   payment_information: Record<string, unknown> | null;
+  // HR / payslip detail fields
+  designation: string | null;
+  department: string | null;
+  location: string | null;
+  bank_account_no: string | null;
   // Statutory identifiers / drivers (Phase 1)
   pan: string | null;
   uan: string | null;
@@ -297,12 +302,24 @@ export const apiClient = {
       headers: { ...authHeaders() },
       body: form,
     }).then(handle<T>),
+  postForm: <T>(path: string, form: FormData) =>
+    fetch(`${API_ROOT}${path}`, {
+      method: "POST",
+      headers: { ...authHeaders() },
+      body: form,
+    }).then(handle<T>),
 };
 
 // Fetch a binary file with auth and trigger a browser download. Reuses the
 // 401 handling shape of handle() but keeps the body as a Blob.
 async function downloadFile(path: string): Promise<void> {
-  const res = await fetch(`${API_ROOT}${path}`, { headers: { ...authHeaders() } });
+  // Cache-bust so a re-download always reflects the latest server state (e.g. a
+  // newly-applied payslip template), never a stale browser-cached file.
+  const sep = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${API_ROOT}${path}${sep}_=${Date.now()}`, {
+    headers: { ...authHeaders() },
+    cache: "no-store",
+  });
   if (!res.ok) {
     if (res.status === 401 && typeof window !== "undefined") {
       clearSession();
@@ -399,6 +416,9 @@ export const payrollApi = {
   listCyclePayslips: (cycleId: string) =>
     apiClient.get<Payslip[]>(`${P}/cycles/${cycleId}/payslips`),
   getPayslip: (id: string) => apiClient.get<Payslip>(`${P}/payslips/${id}`),
+  // HTML rendered from the company's uploaded template ({html:null} = none).
+  getPayslipPreviewHtml: (id: string) =>
+    apiClient.get<{ html: string | null }>(`${P}/payslips/${id}/preview-html`),
   downloadPayslipPdf: (id: string) => downloadFile(`${P}/payslips/${id}/pdf`),
   downloadPayslipDocx: (id: string) => downloadFile(`${P}/payslips/${id}/docx`),
   emailPayslip: (id: string) => apiClient.post<EmailResult>(`${P}/payslips/${id}/email`),
@@ -464,11 +484,38 @@ export interface PayslipSettings {
   company_name: string; // actual company name, used as the display fallback
   has_doc_template: boolean; // whether a .docx template has been uploaded
   doc_filename: string | null;
+  doc_mapped: boolean; // active template was produced by the mapping wizard
+  doc_has_tokens: boolean; // active template actually has fillable {{ tokens }}
 }
 
 export type PayslipSettingsUpdate = Partial<
-  Omit<PayslipSettings, "company_name" | "has_doc_template" | "doc_filename">
+  Omit<
+    PayslipSettings,
+    "company_name" | "has_doc_template" | "doc_filename" | "doc_mapped"
+  >
 >;
+
+// --- Payslip "smart mapping" wizard ---
+export interface PayslipFieldOption {
+  group: string;
+  key: string; // the docxtpl token, e.g. "employee.name" / "amount.BASIC"
+  label: string;
+}
+
+export interface PayslipDocSlot {
+  index: number;
+  kind: "table" | "para";
+  label: string;
+  context: string;
+  current: string;
+  suggested_token: string | null;
+}
+
+export interface PayslipDocScan {
+  filename: string;
+  slots: PayslipDocSlot[];
+  fields: PayslipFieldOption[];
+}
 
 // Statutory rates/thresholds (rates are fractions: 0.12 = 12%).
 export interface StatutoryConfig {
@@ -502,6 +549,15 @@ export const settingsApi = {
   },
   deletePayslipDocument: () => apiClient.del<PayslipSettings>(`${S}/payslip/document`),
   downloadSampleTemplate: () => downloadFile(`${S}/payslip/document/sample`),
+  // Smart mapping wizard: scan an existing template, then apply the mapping.
+  scanPayslipDocument: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.postForm<PayslipDocScan>(`${S}/payslip/document/scan`, form);
+  },
+  getPayslipMapping: () => apiClient.get<PayslipDocScan>(`${S}/payslip/document/mapping`),
+  applyPayslipMapping: (mapping: Record<string, string>) =>
+    apiClient.put<PayslipSettings>(`${S}/payslip/document/mapping`, { mapping }),
   getStatutoryConfig: () => apiClient.get<StatutoryConfig>(`${S}/statutory`),
   updateStatutoryConfig: (body: StatutoryConfigUpdate) =>
     apiClient.put<StatutoryConfig>(`${S}/statutory`, body),

@@ -1401,6 +1401,535 @@ def test_payslip_docx_404_without_template() -> None:
         assert r.status_code == status.HTTP_404_NOT_FOUND
 
 
+def _blank_payslip_docx() -> bytes:
+    """A company's own BLANK payslip: labels + empty value cells, NO tokens —
+    exactly what the smart-mapping wizard must handle."""
+    import io
+
+    from docx import Document
+
+    d = Document()
+    d.add_paragraph("Employee Name: ")
+    t = d.add_table(rows=3, cols=4)
+    t.cell(0, 0).text = "Basic Salary"; t.cell(0, 2).text = "Provident Fund"
+    t.cell(1, 0).text = "House Rent Allowance"; t.cell(1, 2).text = "Professional Tax"
+    t.cell(2, 0).text = "Gross Earnings"; t.cell(2, 2).text = "Total Deductions"
+    d.add_paragraph("Net Pay: ")
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+def test_payslip_smart_mapping_wizard_fills_blank_template() -> None:
+    docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            # 1) Scan a token-free blank template. Every label→blank pair should
+            #    surface, with common labels auto-suggested.
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("blank.docx", _blank_payslip_docx(), docx_mime)},
+            )
+            assert scan.status_code == status.HTTP_200_OK, scan.text
+            body = scan.json()
+            slots = body["slots"]
+            assert len(slots) >= 8, slots
+            suggested = {s["label"]: s["suggested_token"] for s in slots}
+            assert suggested.get("Basic Salary") == "amount.BASIC"
+            assert suggested.get("Net Pay") == "net"
+            assert suggested.get("Employee Name") == "employee.name"
+            assert any(f["key"] == "amount.HRA" for f in body["fields"])
+
+            # 2) Apply the auto-suggested mapping.
+            mapping = {
+                str(s["index"]): s["suggested_token"]
+                for s in slots
+                if s["suggested_token"]
+            }
+            applied = c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            assert applied.status_code == status.HTTP_200_OK, applied.text
+            assert applied.json()["has_doc_template"] is True
+            assert applied.json()["doc_mapped"] is True
+            # Applying the mapping turns the doc template on automatically.
+            assert applied.json()["use_doc_template"] is True
+
+            # 3) The generated .docx is filled from the mapped template.
+            import io as _io
+
+            from docx import Document as _Doc
+
+            doc = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/docx")
+            assert doc.status_code == status.HTTP_200_OK, doc.text
+            parsed = _Doc(_io.BytesIO(doc.content))
+            text = "\n".join(p.text for p in parsed.paragraphs)
+            for tbl in parsed.tables:
+                for row in tbl.rows:
+                    text += "\n" + " | ".join(cell.text for cell in row.cells)
+            assert "John Doe" in text, text
+            assert "{{" not in text, f"unfilled token remains: {text}"
+
+            # 4) The template drives the on-screen / print HTML view too.
+            prev = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html")
+            assert prev.status_code == status.HTTP_200_OK, prev.text
+            html = prev.json()["html"]
+            assert html and "John Doe" in html, html
+            assert "{{" not in html, f"unfilled token in preview: {html}"
+
+            # 5) And it drives the PDF (via fpdf2's HTML engine — no LibreOffice).
+            pdf = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/pdf")
+            assert pdf.status_code == status.HTTP_200_OK
+            assert pdf.content[:4] == b"%PDF"
+
+            # 6) Re-open the wizard: saved choices are pre-filled as suggestions.
+            reopened = c.get("/api/v1/enterprise/settings/payslip/document/mapping")
+            assert reopened.status_code == status.HTTP_200_OK, reopened.text
+            again = {s["label"]: s["suggested_token"] for s in reopened.json()["slots"]}
+            assert again.get("Basic Salary") == "amount.BASIC"
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_pdf_uses_template_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The /pdf endpoint must render the company's template (not the built-in
+    layout) when it's enabled. We disable PDF compression so the template's text
+    is greppable in the raw bytes, proving which renderer ran."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    from app.services import pdf_service
+
+    _orig = pdf_service._PayslipPDF.__init__
+
+    def _init(self: Any, *a: Any, **k: Any) -> None:
+        _orig(self, *a, **k)
+        self.set_compression(False)
+
+    monkeypatch.setattr(pdf_service._PayslipPDF, "__init__", _init)
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def blank() -> bytes:
+        d = _Doc()
+        d.add_paragraph("ZZUNIQUEHEADER ACME")
+        t = d.add_table(rows=2, cols=4)
+        t.cell(0, 0).text = "Basic Salary"; t.cell(0, 2).text = "Provident Fund"
+        t.cell(1, 0).text = "Net Pay"; t.cell(1, 2).text = "Total Deductions"
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("blank.docx", blank(), mime)},
+            )
+            slots = scan.json()["slots"]
+            mapping = {
+                str(s["index"]): s["suggested_token"]
+                for s in slots
+                if s["suggested_token"]
+            }
+            c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            pdf = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/pdf").content
+            assert b"ZZUNIQUEHEADER" in pdf, "PDF did not use the template content"
+            assert b"Net Payable" not in pdf, "PDF used the built-in layout"
+            # Downloads must not be cached, so re-downloading reflects new state.
+            r = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/pdf")
+            assert "no-store" in r.headers.get("cache-control", "")
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_mapping_detects_text_value_and_vertical_cells() -> None:
+    """Employee/company detail cells — which hold sample TEXT, or sit in a
+    label-above-value stack — must be detected and filled, not just blank/numeric
+    amount cells."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def template() -> bytes:
+        d = _Doc()
+        # Employee details with SAMPLE TEXT values (horizontal pairs).
+        det = d.add_table(rows=1, cols=4)
+        det.cell(0, 0).text = "Employee Name"; det.cell(0, 1).text = "SAMPLE PERSON"
+        det.cell(0, 2).text = "Designation"; det.cell(0, 3).text = "Sample Role"
+        # Vertical block: labels above blank values.
+        ver = d.add_table(rows=2, cols=2)
+        ver.cell(0, 0).text = "PAN"; ver.cell(0, 1).text = "Net Pay"
+        ver.cell(1, 0).text = ""; ver.cell(1, 1).text = ""
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("emp.docx", template(), mime)},
+            )
+            labels = {s["label"]: s["suggested_token"] for s in scan.json()["slots"]}
+            assert labels.get("Employee Name") == "employee.name"
+            assert labels.get("Designation") == "employee.designation"
+            assert labels.get("PAN") == "employee.pan"  # vertical block detected
+            assert labels.get("Net Pay") == "net"
+
+            mapping = {
+                str(s["index"]): s["suggested_token"]
+                for s in scan.json()["slots"]
+                if s["suggested_token"]
+            }
+            c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            prev = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html")
+            html = prev.json()["html"]
+            assert "John Doe" in html, html          # employee name filled
+            assert "SAMPLE PERSON" not in html         # sample text overwritten
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_mapping_detects_label_fields_inside_table_cells() -> None:
+    """Header fields like 'Company Name: ____' that live INSIDE table cells
+    (single-column or merged rows) must be detected and filled — doc.paragraphs
+    doesn't include cell paragraphs, so this guards that path."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def tmpl() -> bytes:
+        d = _Doc()
+        hdr = d.add_table(rows=2, cols=1)  # single-column header block
+        hdr.cell(0, 0).text = "Company Name: " + "_" * 20
+        hdr.cell(1, 0).text = "Employee Name: " + "_" * 20
+        merged = d.add_table(rows=1, cols=2)
+        mc = merged.cell(0, 0).merge(merged.cell(0, 1))  # merged-across row
+        mc.text = "Designation: " + "_" * 20
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("t.docx", tmpl(), mime)},
+            )
+            slots = scan.json()["slots"]
+            by_label = {s["label"]: s["suggested_token"] for s in slots}
+            assert by_label.get("Company Name") == "company_name"
+            assert by_label.get("Employee Name") == "employee.name"
+            assert by_label.get("Designation") == "employee.designation"
+
+            mapping = {
+                str(s["index"]): s["suggested_token"] for s in slots if s["suggested_token"]
+            }
+            c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            html = c.get(
+                f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html"
+            ).json()["html"]
+            assert "John Doe" in html, html  # employee name filled inside the cell
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_mapping_handles_bracketed_logo_placeholder() -> None:
+    """A standalone "[ COMPANY LOGO ]" placeholder is detected, auto-suggested to
+    the logo field, and replaced in the generated payslip (not left as-is)."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def tmpl() -> bytes:
+        d = _Doc()
+        d.add_paragraph("[ COMPANY LOGO ]")
+        d.add_paragraph("Employee Name: ")
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("t.docx", tmpl(), mime)},
+            )
+            slots = scan.json()["slots"]
+            logo = next(s for s in slots if s["label"] == "COMPANY LOGO")
+            assert logo["suggested_token"] == "logo"
+            mapping = {
+                str(s["index"]): s["suggested_token"] for s in slots if s["suggested_token"]
+            }
+            c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            html = c.get(
+                f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html"
+            ).json()["html"]
+            assert "[ COMPANY LOGO ]" not in html, html  # placeholder replaced
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_amount_to_words_conversion() -> None:
+    """Net-pay-in-words spelling: Indian lakh/crore grouping, paise, currency
+    units, rounding carry-over, and unknown-code fallback."""
+    from app.services.docx_service import amount_to_words as w
+
+    assert w(12345.50, "INR") == (
+        "Rupees Twelve Thousand Three Hundred Forty-Five and Fifty Paise Only"
+    )
+    assert w(1234567, "INR") == (
+        "Rupees Twelve Lakh Thirty-Four Thousand Five Hundred Sixty-Seven Only"
+    )
+    assert w(10000000, "INR") == "Rupees One Crore Only"
+    assert w(999.999, "INR") == "Rupees One Thousand Only"  # rounds up
+    assert w(0, "INR") == "Rupees Zero Only"
+    assert w(1234567.05, "USD") == (
+        "Dollars One Million Two Hundred Thirty-Four Thousand "
+        "Five Hundred Sixty-Seven and Five Cents Only"
+    )
+    assert w(1000, "XYZ") == "XYZ One Thousand Only"  # unknown code falls back
+
+
+def test_payslip_net_pay_in_words_mapped_and_filled() -> None:
+    """A "Net Pay in words" line is detected, auto-suggested to net_in_words, and
+    filled with the spelled-out net pay in the generated payslip."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def tmpl() -> bytes:
+        d = _Doc()
+        d.add_paragraph("Net Pay: {{ net }}")
+        d.add_paragraph("Net Pay in words: ")
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("t.docx", tmpl(), mime)},
+            )
+            slots = scan.json()["slots"]
+            words_slot = next(s for s in slots if s["label"] == "Net Pay in words")
+            assert words_slot["suggested_token"] == "net_in_words"
+            mapping = {
+                str(s["index"]): s["suggested_token"] for s in slots if s["suggested_token"]
+            }
+            c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            html = c.get(
+                f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html"
+            ).json()["html"]
+            assert "Net Pay in words:" in html
+            # The spelled-out amount (whatever the net is) ends with "Only".
+            assert "Rupees" in html and "Only" in html, html
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_logo_lands_on_placeholder_not_stray_token() -> None:
+    """The logo image embeds AT the "[ COMPANY LOGO ]" placeholder (keeping its
+    alignment), and any stray {{ logo }} token elsewhere is cleared — so the
+    logo is never duplicated or dropped in a random spot."""
+    import io as _io
+
+    from docx import Document as _Doc
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.ns import qn
+    from PIL import Image
+
+    from app.services import docx_service
+
+    png = _io.BytesIO(); Image.new("RGB", (120, 50), (200, 0, 0)).save(png, "PNG")
+
+    d = _Doc()
+    d.add_paragraph("ACME PAYSLIP")
+    p = d.add_paragraph("[ COMPANY LOGO ]"); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    d.add_paragraph("Stray: {{ logo }}")  # mis-placed token must not win
+    b = _io.BytesIO(); d.save(b); tpl = b.getvalue()
+
+    out = docx_service.render_payslip_docx(tpl, {"logo": "ACME"}, logo_image=png.getvalue())
+    rd = _Doc(_io.BytesIO(out))
+
+    def img_count(par) -> int:
+        return len(par._p.findall(".//" + qn("a:blip")))
+
+    placeholder = rd.paragraphs[1]
+    assert img_count(placeholder) == 1, "logo not at the [ COMPANY LOGO ] placeholder"
+    assert placeholder.alignment == WD_ALIGN_PARAGRAPH.CENTER  # alignment preserved
+    assert sum(img_count(par) for par in rd.paragraphs) == 1, "logo duplicated"
+    assert not any("{{" in par.text for par in rd.paragraphs), "stray token left"
+
+
+def test_payslip_logo_image_used_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a branding logo_url is set, the [ COMPANY LOGO ] placeholder renders
+    the actual logo IMAGE (no re-asking) — embedded as <img> in the preview."""
+    import io as _io
+
+    from docx import Document as _Doc
+    from PIL import Image
+
+    from app.services import docx_service
+
+    # Avoid any network: the logo "fetch" returns a small in-memory PNG.
+    png = _io.BytesIO(); Image.new("RGB", (120, 50), (10, 80, 200)).save(png, "PNG")
+    monkeypatch.setattr(docx_service, "fetch_logo_image", lambda url: png.getvalue())
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def tmpl() -> bytes:
+        d = _Doc()
+        d.add_paragraph("[ COMPANY LOGO ]")
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        try:
+            # Configure a branding logo URL in settings.
+            c.put(
+                "/api/v1/enterprise/settings/payslip",
+                json={"logo_url": "https://example.com/logo.png"},
+            )
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("t.docx", tmpl(), mime)},
+            )
+            slots = scan.json()["slots"]
+            mapping = {
+                str(s["index"]): s["suggested_token"] for s in slots if s["suggested_token"]
+            }
+            c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            html = c.get(
+                f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html"
+            ).json()["html"]
+            assert '<img src="data:image' in html, "logo image not embedded"
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+            c.put("/api/v1/enterprise/settings/payslip", json={"logo_url": None})
+
+
+def test_payslip_mapping_reads_existing_placeholders() -> None:
+    """If the uploaded template already contains {{ tokens }}, the wizard pre-maps
+    those slots from the existing token (not just the label)."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def tokenised() -> bytes:
+        d = _Doc()
+        d.add_paragraph("Staff Member: {{ employee.name }}")  # label we don't know
+        t = d.add_table(rows=1, cols=2)
+        t.cell(0, 0).text = "Take Home"; t.cell(0, 1).text = "{{ net }}"
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        try:
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("t.docx", tokenised(), mime)},
+            )
+            by_label = {s["label"]: s["suggested_token"] for s in scan.json()["slots"]}
+            # Pre-mapped from the existing placeholders, despite unknown labels.
+            assert by_label.get("Staff Member") == "employee.name"
+            assert by_label.get("Take Home") == "net"
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_doc_has_tokens_flag() -> None:
+    """A raw (token-free) upload reports doc_has_tokens=False; after mapping it
+    flips to True. This is what the UI uses to warn 'no data will fill'."""
+    import io as _io
+
+    from docx import Document as _Doc
+
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    def blank() -> bytes:
+        d = _Doc()
+        d.add_paragraph("Net Pay: ")
+        t = d.add_table(rows=1, cols=2)
+        t.cell(0, 0).text = "Basic Salary"
+        b = _io.BytesIO(); d.save(b); return b.getvalue()
+
+    with authed_client() as c:
+        try:
+            # Direct upload of a token-free doc -> no fillable fields.
+            up = c.put(
+                "/api/v1/enterprise/settings/payslip/document",
+                files={"file": ("blank.docx", blank(), mime)},
+            )
+            assert up.status_code == status.HTTP_200_OK, up.text
+            assert up.json()["has_doc_template"] is True
+            assert up.json()["doc_has_tokens"] is False
+
+            # Map it via the wizard -> tokens injected, flag flips.
+            scan = c.post(
+                "/api/v1/enterprise/settings/payslip/document/scan",
+                files={"file": ("blank.docx", blank(), mime)},
+            )
+            slots = scan.json()["slots"]
+            mapping = {
+                str(s["index"]): s["suggested_token"] for s in slots if s["suggested_token"]
+            }
+            applied = c.put(
+                "/api/v1/enterprise/settings/payslip/document/mapping",
+                json={"mapping": mapping},
+            )
+            assert applied.json()["doc_has_tokens"] is True
+        finally:
+            c.delete("/api/v1/enterprise/settings/payslip/document")
+
+
+def test_payslip_preview_html_null_without_template() -> None:
+    with authed_client() as c:
+        slip = _paid_payslip(c)
+        c.delete("/api/v1/enterprise/settings/payslip/document")
+        r = c.get(f"/api/v1/enterprise/payroll/payslips/{slip['id']}/preview-html")
+        assert r.status_code == status.HTTP_200_OK
+        assert r.json()["html"] is None
+
+
+def test_payslip_mapping_requires_scanned_original() -> None:
+    with authed_client() as c:
+        c.delete("/api/v1/enterprise/settings/payslip/document")
+        # No scanned original -> 404.
+        r = c.put(
+            "/api/v1/enterprise/settings/payslip/document/mapping",
+            json={"mapping": {"0": "net"}},
+        )
+        assert r.status_code == status.HTTP_404_NOT_FOUND
+
+
 def _configure_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import email_service
 

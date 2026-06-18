@@ -93,6 +93,51 @@ class PayslipSettingsOut(PayslipSettings):
     # Uploaded-document-template metadata (the bytes are never returned).
     has_doc_template: bool = False
     doc_filename: str | None = None
+    # True when the active template was produced by the smart mapping wizard
+    # (i.e. an original upload + a saved field mapping exist).
+    doc_mapped: bool = False
+    # True when the active template actually contains fillable {{ tokens }}. If a
+    # template is uploaded but this is False, payslips render the layout with no
+    # data — the UI should warn and steer the admin to the mapping wizard.
+    doc_has_tokens: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Payslip "smart mapping" wizard (Settings → Payslip)
+# ---------------------------------------------------------------------------
+class PayslipFieldOption(BaseModel):
+    """One mappable payroll field for the wizard's field dropdown."""
+
+    group: str
+    key: str  # the docxtpl token, e.g. "employee.name" / "amount.BASIC"
+    label: str
+
+
+class PayslipDocSlot(BaseModel):
+    """A detected value-slot in the uploaded document the admin can map."""
+
+    index: int
+    kind: str  # "table" | "para"
+    label: str  # the recognised label text next to the slot
+    context: str  # surrounding text, to help the admin disambiguate
+    current: str  # whatever currently sits in the slot (sample value / blank)
+    suggested_token: str | None = None  # auto-detected field, or null
+
+
+class PayslipDocScanOut(BaseModel):
+    """Result of scanning an uploaded template: detected slots + the catalogue
+    of fields they can be mapped to."""
+
+    filename: str
+    slots: list[PayslipDocSlot]
+    fields: list[PayslipFieldOption]
+
+
+class PayslipMappingApply(BaseModel):
+    """Confirmed mapping: slot index (as string, from JSON) -> token key. A
+    blank/missing value leaves that slot untouched."""
+
+    mapping: dict[str, str] = Field(default_factory=dict)
 
 
 class PayslipSettingsUpdate(BaseModel):

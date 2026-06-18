@@ -845,8 +845,13 @@ def _docx_context(
     company_address = ", ".join(p for p in addr_parts if p)
 
     doj = getattr(employee, "date_of_joining", None) if employee else None
+    company_display = ps.display_name or (company.name if company else "Company")
     return {
-        "company_name": ps.display_name or (company.name if company else "Company"),
+        "company_name": company_display,
+        # Logo placeholder ("[ COMPANY LOGO ]"). Text fallback = company display
+        # name; replaced by the real logo IMAGE in render_payslip_doc when the
+        # branding logo_url is set.
+        "logo": company_display,
         "company": {
             "name": company.name if company else "",
             "legal_name": (getattr(company, "legal_name", None) or "") if company else "",
@@ -863,8 +868,13 @@ def _docx_context(
             "name": emp_name,
             "email": (employee.email if employee else "") or "",
             "code": (getattr(employee, "employee_id", None) or "") if employee else "",
+            "designation": (getattr(employee, "designation", None) or "") if employee else "",
+            "department": (getattr(employee, "department", None) or "") if employee else "",
+            "location": (getattr(employee, "location", None) or "") if employee else "",
+            "bank_account_no": (getattr(employee, "bank_account_no", None) or "") if employee else "",
             "pan": (getattr(employee, "pan", None) or "") if employee else "",
             "uan": (getattr(employee, "uan", None) or "") if employee else "",
+            "esic": (getattr(employee, "esic_number", None) or "") if employee else "",
             "state": (getattr(employee, "state", None) or "") if employee else "",
             "date_of_joining": str(doj) if doj else "",
         },
@@ -888,6 +898,10 @@ def _docx_context(
         "gross": money(payslip.gross_earnings),
         "total_deductions": money(payslip.total_deductions),
         "net": money(payslip.net_pay),
+        # Net pay spelled out, e.g. "Rupees Twelve Thousand … Only" — for the
+        # "Net Pay in words" line many company payslips carry.
+        "net_in_words": docx_service.amount_to_words(payslip.net_pay, cur),
+        "gross_in_words": docx_service.amount_to_words(payslip.gross_earnings, cur),
         "gross_raw": float(payslip.gross_earnings),
         "net_raw": float(payslip.net_pay),
         "lop_days": float(payslip.lop_days or 0),
@@ -902,25 +916,50 @@ def _render_payslip_doc(
     """Fill the company's uploaded .docx template, or None if there isn't one."""
     if not company or not company.payslip_doc_template:
         return None
+    ps = PayslipSettings.from_stored(company.payslip_settings if company else None)
     ctx = _docx_context(payslip, cycle, employee, company)
-    return docx_service.render_payslip_docx(company.payslip_doc_template, ctx)
+    # Embed the company logo (from the branding logo_url) as a real image for the
+    # {{ logo }} token; falls back to the company-name text when none is set.
+    logo = docx_service.fetch_logo_image(ps.logo_url) if ps.logo_url else None
+    return docx_service.render_payslip_docx(
+        company.payslip_doc_template, ctx, logo_image=logo
+    )
+
+
+def _render_template_html(
+    payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
+) -> str | None:
+    """The company's template, filled and rendered to an HTML fragment — used for
+    the on-screen / print payslip view. None when no template is enabled."""
+    ps = PayslipSettings.from_stored(company.payslip_settings if company else None)
+    if not (company and company.payslip_doc_template and ps.use_doc_template):
+        return None
+    docx_bytes = _render_payslip_doc(payslip, cycle, employee, company)
+    if not docx_bytes:
+        return None
+    return docx_service.docx_to_html(docx_bytes)
 
 
 def _payslip_pdf_bytes(
     payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
 ) -> bytes:
-    """The payslip PDF: from the uploaded .docx template when one is enabled and
-    a docx->pdf converter is present, else the built-in fpdf2 layout."""
+    """The payslip PDF. When the company's .docx template is enabled it drives
+    the PDF: via LibreOffice/Word for full fidelity when available, otherwise via
+    fpdf2's HTML engine (so the template still applies without any converter).
+    Falls back to the built-in fpdf2 layout only if the template path fails."""
     ps = PayslipSettings.from_stored(company.payslip_settings if company else None)
     if company and company.payslip_doc_template and ps.use_doc_template:
         try:
             docx_bytes = _render_payslip_doc(payslip, cycle, employee, company)
             if docx_bytes:
-                pdf = docx_service.docx_to_pdf(docx_bytes)
+                pdf = docx_service.docx_to_pdf(docx_bytes)  # LibreOffice/Word
                 if pdf:
                     return pdf
+                # No converter installed — render the template via HTML instead.
+                html = docx_service.docx_to_html(docx_bytes)
+                return pdf_service.render_template_html_pdf(html, ps.footer_note)
         except Exception:
-            pass  # any template/convert failure -> built-in layout
+            pass  # any template failure -> built-in layout
     return _render_pdf(payslip, cycle, employee, company)
 
 
@@ -941,7 +980,13 @@ async def download_payslip_pdf(
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # Never cache: the template/branding can change, so each download
+            # must reflect the current state (avoids the browser re-serving a
+            # previously downloaded, now-stale PDF).
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -973,8 +1018,31 @@ async def download_payslip_docx(
     return Response(
         content=docx_bytes or b"",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
+
+
+@router.get("/payslips/{id}/preview-html")
+async def payslip_preview_html(
+    id: uuid.UUID,
+    db: DBSessionDep,
+    company_id: uuid.UUID = Depends(get_current_company_id),
+    _: object = Depends(require_permission(Permission.PAYROLL_READ)),
+) -> dict[str, str | None]:
+    """HTML for the on-screen / print payslip, rendered from the company's
+    uploaded template when one is enabled. ``{"html": null}`` means there's no
+    active template, so the client should show its built-in layout."""
+    payslip, cycle, employee, company = await _gather_payslip(db, id, company_id)
+    try:
+        html = await run_in_threadpool(
+            _render_template_html, payslip, cycle, employee, company
+        )
+    except Exception:
+        html = None  # any template failure -> client falls back to built-in view
+    return {"html": html}
 
 
 @router.post("/payslips/{id}/email", response_model=EmailResult)

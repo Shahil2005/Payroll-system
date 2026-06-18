@@ -36,6 +36,12 @@ class Employee(Base, TimestampMixin):
     first_name: Mapped[str] = mapped_column(String(80))
     last_name: Mapped[str] = mapped_column(String(80), default="")
     email: Mapped[str] = mapped_column(String(255))
+
+    # ----- HR / payslip detail fields (optional; surfaced on payslips) -----
+    designation: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    department: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    bank_account_no: Mapped[str | None] = mapped_column(String(34), nullable=True)
     payment_information: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
