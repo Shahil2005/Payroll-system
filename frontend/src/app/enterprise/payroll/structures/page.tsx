@@ -7,6 +7,7 @@ import {
   inr,
   type Employee,
   type MoneyLine,
+  type PayFrequency,
   type ResolvedLine,
   type SalaryStructure,
   type StructurePreviewOut,
@@ -77,7 +78,8 @@ export default function StructuresPage() {
   const [employeeId, setEmployeeId] = useState("");
   const [ctc, setCtc] = useState("1200000");
   const [currency, setCurrency] = useState("INR");
-  const [payFrequency, setPayFrequency] = useState<"MONTHLY" | "WEEKLY">("MONTHLY");
+  const [payFrequency, setPayFrequency] = useState<PayFrequency>("MONTHLY");
+  const [hourlyRate, setHourlyRate] = useState("");
   const [effectiveFrom, setEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
   const [earnings, setEarnings] = useState<LineDraft[]>([]);
   const [deductions, setDeductions] = useState<LineDraft[]>([]);
@@ -183,6 +185,7 @@ export default function StructuresPage() {
     setCtc("1200000");
     setCurrency("INR");
     setPayFrequency("MONTHLY");
+    setHourlyRate("");
     setEffectiveFrom(new Date().toISOString().slice(0, 10));
     setEarnings([
       { ...emptyLine(), code: "BASIC", label: "Basic", type: "fixed", amount: "40000" },
@@ -205,6 +208,7 @@ export default function StructuresPage() {
     setCtc(String(s.ctc));
     setCurrency(s.currency);
     setPayFrequency(s.pay_frequency);
+    setHourlyRate(s.hourly_rate != null ? String(s.hourly_rate) : "");
     setEffectiveFrom(s.effective_from);
     setEarnings(fromMoneyLines(s.components));
     setDeductions(fromMoneyLines(s.default_deductions));
@@ -229,6 +233,7 @@ export default function StructuresPage() {
       ctc: Number(ctc),
       currency,
       pay_frequency: payFrequency,
+      hourly_rate: payFrequency === "HOURLY" ? Number(hourlyRate) || 0 : null,
       effective_from: effectiveFrom,
       components: toMoneyLines(earnings),
       default_deductions: toMoneyLines(deductions),
@@ -446,15 +451,34 @@ export default function StructuresPage() {
                   </label>
                   <label className="flex flex-col gap-1.5">
                     <span className="lbl">Pay Frequency</span>
-                    <select className="input" value={payFrequency} onChange={(e) => setPayFrequency(e.target.value as "MONTHLY" | "WEEKLY")}>
+                    <select className="input" value={payFrequency} onChange={(e) => setPayFrequency(e.target.value as PayFrequency)}>
                       <option value="MONTHLY">MONTHLY</option>
                       <option value="WEEKLY">WEEKLY</option>
+                      <option value="HOURLY">HOURLY</option>
                     </select>
                   </label>
                   <label className="flex flex-col gap-1.5">
                     <span className="lbl">Effective From</span>
                     <input type="date" className="input" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} required />
                   </label>
+                  {payFrequency === "HOURLY" && (
+                    <label className="flex flex-col gap-1.5">
+                      <span className="lbl">Hourly Rate</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        className="input"
+                        value={hourlyRate}
+                        onChange={(e) => setHourlyRate(e.target.value)}
+                        placeholder="e.g. 500"
+                      />
+                      <span className="text-xs text-[var(--color-dim)]">
+                        Gross = approved timesheet hours × rate. Earnings below are ignored for
+                        hourly staff.
+                      </span>
+                    </label>
+                  )}
                 </div>
 
                 <LineSection

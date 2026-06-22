@@ -11,11 +11,14 @@ from app.core.settings import Settings
 from app.router.audit import router as audit_router
 from app.router.auth import router as auth_router
 from app.router.base import router as base_router
+from app.router.calendar import router as calendar_router
 from app.router.employee import router as employee_router
+from app.router.leave import router as leave_router
 from app.router.payroll import router as payroll_router
 from app.router.reports import router as reports_router
 from app.router.settings import router as settings_router
 from app.router.taxes import router as taxes_router
+from app.router.timesheets import router as timesheets_router
 from app.services import audit_service
 
 _settings = Settings()
@@ -116,3 +119,6 @@ app.include_router(reports_router)
 app.include_router(settings_router)
 app.include_router(taxes_router)
 app.include_router(audit_router)
+app.include_router(calendar_router)
+app.include_router(timesheets_router)
+app.include_router(leave_router)

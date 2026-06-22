@@ -52,6 +52,78 @@ CTC_CODE = "CTC"
 class PayFrequency(str, Enum):
     MONTHLY = "MONTHLY"
     WEEKLY = "WEEKLY"
+    # Hourly-paid staff: the structure carries an `hourly_rate` (not a CTC) and
+    # gross = hours_worked * rate. Attendance is logged as hours on the timesheet
+    # rather than day statuses. See payroll_service.compute_hourly_payslip.
+    HOURLY = "HOURLY"
+
+
+# ----- Timesheets / attendance ---------------------------------------------
+# Weekly-off days used when deriving the working-day count for a period from the
+# calendar (vs the fixed DEFAULT_WORKING_DAYS). Stored per company in
+# Company.statutory_settings (see schema.settings WorkCalendarConfig); these are
+# the fallback defaults. Day codes are the 3-letter uppercase weekday names.
+DEFAULT_WEEKLY_OFFS = ["SAT", "SUN"]
+
+# Python date.weekday() (Mon=0 .. Sun=6) -> the day code used in weekly_offs.
+WEEKDAY_CODES = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+
+
+class TimesheetStatus(str, Enum):
+    """A timesheet's lifecycle. Only APPROVED timesheets feed a payroll run."""
+
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+class TimesheetMode(str, Enum):
+    """How a timesheet's days are recorded — derived from the employee's active
+    salary structure's pay_frequency (HOURLY -> hours; else day statuses)."""
+
+    ATTENDANCE = "ATTENDANCE"
+    HOURLY = "HOURLY"
+
+
+class DayStatus(str, Enum):
+    """Per-day attendance status (ATTENDANCE-mode timesheets).
+
+    Paid days: PRESENT, PAID_LEAVE, WFH, HOLIDAY, WEEKLY_OFF (the last two are
+    non-working days that never count as LOP). UNPAID_LEAVE is a full LOP day;
+    HALF_DAY is half a paid day / half a LOP day. See
+    timesheet_service.recompute_aggregates.
+    """
+
+    PRESENT = "PRESENT"
+    PAID_LEAVE = "PAID_LEAVE"
+    UNPAID_LEAVE = "UNPAID_LEAVE"
+    HALF_DAY = "HALF_DAY"
+    WFH = "WFH"
+    HOLIDAY = "HOLIDAY"
+    WEEKLY_OFF = "WEEKLY_OFF"
+
+
+# ----- Leave management -------------------------------------------------------
+class AccrualMethod(str, Enum):
+    """How a leave type's annual quota is credited to an employee's balance.
+
+    ANNUAL  — the full quota is available up front (credited on balance creation).
+    MONTHLY — the quota accrues 1/12 per month elapsed in the financial year.
+    """
+
+    ANNUAL = "ANNUAL"
+    MONTHLY = "MONTHLY"
+
+
+class LeaveStatus(str, Enum):
+    """A leave request's lifecycle. Only APPROVED requests decrement a balance
+    and stamp timesheet days (PAID_LEAVE / UNPAID_LEAVE)."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
 
 
 class TaxRegime(str, Enum):

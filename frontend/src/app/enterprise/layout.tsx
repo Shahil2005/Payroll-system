@@ -11,6 +11,8 @@ const NAV: { label: string; icon: string; path: string }[] = [
   { label: "Payroll", icon: "payments", path: "/enterprise/payroll" },
   { label: "Salary Templates", icon: "content_copy", path: "/enterprise/payroll/templates" },
   { label: "Salary Structures", icon: "tune", path: "/enterprise/payroll/structures" },
+  { label: "Timesheets", icon: "schedule", path: "/enterprise/timesheets" },
+  { label: "Leave", icon: "event_available", path: "/enterprise/leave" },
   { label: "Employees", icon: "groups", path: "/enterprise/employees" },
   { label: "Taxes & Forms", icon: "request_quote", path: "/enterprise/taxes" },
   { label: "Reports", icon: "summarize", path: "/enterprise/reports" },

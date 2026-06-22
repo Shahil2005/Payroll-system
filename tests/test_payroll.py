@@ -519,8 +519,15 @@ def test_payroll_lifecycle() -> None:
 
 
 def test_run_uses_structure_lop_days() -> None:
-    """HR sets lop_days on the salary structure; run pro-rates earnings by it."""
+    """HR sets lop_days on the salary structure; run pro-rates earnings by it.
+
+    Pins the company to the fixed 30-day basis (calendar-derived working days
+    OFF) so the proration is tested in isolation from the work calendar."""
     with authed_client() as c:
+        c.put(
+            "/api/v1/enterprise/calendar/config",
+            json={"use_calendar_working_days": False},
+        )
         # BASIC 40000 + HRA 40% = 56000 gross; 3 LOP days over 30 -> x0.9
         _create_structure(c, employee_id=EMP1, lop_days=3)
         cid = _create_cycle(c, name="LOP cycle")["id"]

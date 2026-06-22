@@ -28,7 +28,7 @@ export interface ResolvedLine {
   amount: number;
 }
 
-export type PayFrequency = "MONTHLY" | "WEEKLY";
+export type PayFrequency = "MONTHLY" | "WEEKLY" | "HOURLY";
 
 export interface SalaryStructure {
   id: string;
@@ -37,6 +37,8 @@ export interface SalaryStructure {
   ctc: number | string;
   currency: string;
   pay_frequency: PayFrequency;
+  // Set when pay_frequency is HOURLY: gross = hours_worked * rate.
+  hourly_rate?: number | string | null;
   effective_from: string;
   components: MoneyLine[];
   default_deductions: MoneyLine[];
@@ -431,6 +433,208 @@ export const payrollApi = {
   updateEmployee: (id: string, body: Partial<Employee>) =>
     apiClient.put<Employee>(`${E}/${id}`, body),
   deleteEmployee: (id: string) => apiClient.del<void>(`${E}/${id}`),
+};
+
+// --- Timesheets & work calendar --------------------------------------------
+const TS = "/api/v1/enterprise/timesheets";
+const CAL = "/api/v1/enterprise/calendar";
+
+export type TimesheetStatus = "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED";
+export type TimesheetMode = "ATTENDANCE" | "HOURLY";
+export type DayStatus =
+  | "PRESENT"
+  | "PAID_LEAVE"
+  | "UNPAID_LEAVE"
+  | "HALF_DAY"
+  | "WFH"
+  | "HOLIDAY"
+  | "WEEKLY_OFF";
+
+/** Day-status options HR can pick per working day (non-working ones are set by
+ *  the calendar and shown read-only). */
+export const DAY_STATUS_OPTIONS: { value: DayStatus; label: string }[] = [
+  { value: "PRESENT", label: "Present" },
+  { value: "PAID_LEAVE", label: "Paid Leave" },
+  { value: "UNPAID_LEAVE", label: "Unpaid Leave (LOP)" },
+  { value: "HALF_DAY", label: "Half Day" },
+  { value: "WFH", label: "Work From Home" },
+  { value: "HOLIDAY", label: "Holiday" },
+  { value: "WEEKLY_OFF", label: "Weekly Off" },
+];
+
+export interface TimesheetEntry {
+  id: string;
+  entry_date: string;
+  day_status: DayStatus;
+  hours: number | string | null;
+  note: string | null;
+}
+
+export interface Timesheet {
+  id: string;
+  company_id: string;
+  cycle_id: string;
+  employee_id: string;
+  period_start: string;
+  period_end: string;
+  mode: TimesheetMode;
+  status: TimesheetStatus;
+  worked_days: number | string;
+  lop_days: number | string;
+  half_days: number | string;
+  total_hours: number | string;
+  submitted_at: string | null;
+  approved_at: string | null;
+  submitted_by_id?: string | null;
+  approved_by_id?: string | null;
+  notes: string | null;
+  employee_name?: string | null;
+  employee_code?: string | null;
+}
+
+export interface TimesheetDetail extends Timesheet {
+  entries: TimesheetEntry[];
+  submitted_by_name?: string | null;
+  approved_by_name?: string | null;
+}
+
+export interface TimesheetGenerateResult {
+  created: number;
+  existing: number;
+  skipped: SkippedEmployee[];
+}
+
+/** One day's edit (matched to a seeded entry by date). */
+export interface TimesheetEntryEdit {
+  entry_date: string;
+  day_status?: DayStatus;
+  hours?: number | null;
+  note?: string | null;
+}
+
+export interface Holiday {
+  id: string;
+  holiday_date: string;
+  name: string;
+}
+
+export interface WorkCalendarConfig {
+  use_calendar_working_days: boolean;
+  weekly_offs: string[];
+  // Segregation of duties: when on, a timesheet/leave submitter cannot approve
+  // their own submission.
+  enforce_maker_checker: boolean;
+}
+
+export const timesheetApi = {
+  generate: (cycleId: string) =>
+    apiClient.post<TimesheetGenerateResult>(`${TS}/cycles/${cycleId}/generate`),
+  listForCycle: (cycleId: string) => apiClient.get<Timesheet[]>(`${TS}/cycles/${cycleId}`),
+  get: (id: string) => apiClient.get<TimesheetDetail>(`${TS}/${id}`),
+  updateEntries: (id: string, entries: TimesheetEntryEdit[]) =>
+    apiClient.put<TimesheetDetail>(`${TS}/${id}/entries`, { entries }),
+  submit: (id: string) => apiClient.post<Timesheet>(`${TS}/${id}/submit`),
+  approve: (id: string) => apiClient.post<Timesheet>(`${TS}/${id}/approve`),
+  reject: (id: string, note?: string) =>
+    apiClient.post<Timesheet>(`${TS}/${id}/reject`, { note: note ?? null }),
+  reopen: (id: string) => apiClient.post<Timesheet>(`${TS}/${id}/reopen`),
+};
+
+export const calendarApi = {
+  getConfig: () => apiClient.get<WorkCalendarConfig>(`${CAL}/config`),
+  updateConfig: (body: Partial<WorkCalendarConfig>) =>
+    apiClient.put<WorkCalendarConfig>(`${CAL}/config`, body),
+  listHolidays: () => apiClient.get<Holiday[]>(`${CAL}/holidays`),
+  createHoliday: (holiday_date: string, name: string) =>
+    apiClient.post<Holiday>(`${CAL}/holidays`, { holiday_date, name }),
+  deleteHoliday: (id: string) => apiClient.del<void>(`${CAL}/holidays/${id}`),
+};
+
+// --- Leave management ------------------------------------------------------
+const LV = "/api/v1/enterprise/leave";
+
+export type AccrualMethod = "ANNUAL" | "MONTHLY";
+export type LeaveStatus = "PENDING" | "APPROVED" | "REJECTED" | "CANCELLED";
+
+export interface LeaveType {
+  id: string;
+  name: string;
+  code: string;
+  is_paid: boolean;
+  annual_quota: number | string;
+  accrual: AccrualMethod;
+  carry_forward_cap: number | string | null;
+  is_active: boolean;
+}
+
+export interface LeaveTypeInput {
+  name: string;
+  code: string;
+  is_paid: boolean;
+  annual_quota: number;
+  accrual: AccrualMethod;
+}
+
+export interface LeaveBalance {
+  id: string;
+  employee_id: string;
+  leave_type_id: string;
+  financial_year: string;
+  entitled: number | string;
+  accrued: number | string;
+  used: number | string;
+  balance: number | string;
+  employee_name?: string | null;
+  leave_type_name?: string | null;
+  leave_type_code?: string | null;
+  is_paid?: boolean | null;
+}
+
+export interface LeaveRequest {
+  id: string;
+  employee_id: string;
+  leave_type_id: string;
+  start_date: string;
+  end_date: string;
+  days: number | string;
+  half_day: boolean;
+  status: LeaveStatus;
+  reason: string | null;
+  decision_note: string | null;
+  decided_at: string | null;
+  employee_name?: string | null;
+  leave_type_name?: string | null;
+  leave_type_code?: string | null;
+}
+
+export interface LeaveRequestInput {
+  employee_id: string;
+  leave_type_id: string;
+  start_date: string;
+  end_date: string;
+  half_day?: boolean;
+  reason?: string | null;
+}
+
+export const leaveApi = {
+  listTypes: () => apiClient.get<LeaveType[]>(`${LV}/types`),
+  createType: (body: LeaveTypeInput) => apiClient.post<LeaveType>(`${LV}/types`, body),
+  updateType: (id: string, body: Partial<LeaveTypeInput> & { is_active?: boolean }) =>
+    apiClient.put<LeaveType>(`${LV}/types/${id}`, body),
+  listBalances: (financialYear?: string) =>
+    apiClient.get<LeaveBalance[]>(
+      `${LV}/balances${financialYear ? `?financial_year=${financialYear}` : ""}`,
+    ),
+  listRequests: (status?: LeaveStatus) =>
+    apiClient.get<LeaveRequest[]>(`${LV}/requests${status ? `?status=${status}` : ""}`),
+  createRequest: (body: LeaveRequestInput) =>
+    apiClient.post<LeaveRequest>(`${LV}/requests`, body),
+  approveRequest: (id: string, note?: string) =>
+    apiClient.post<LeaveRequest>(`${LV}/requests/${id}/approve`, { note: note ?? null }),
+  rejectRequest: (id: string, note?: string) =>
+    apiClient.post<LeaveRequest>(`${LV}/requests/${id}/reject`, { note: note ?? null }),
+  cancelRequest: (id: string, note?: string) =>
+    apiClient.post<LeaveRequest>(`${LV}/requests/${id}/cancel`, { note: note ?? null }),
 };
 
 // --- Reports ---------------------------------------------------------------

@@ -56,9 +56,11 @@ class ResolvedLine(BaseModel):
 # Salary structures
 # ---------------------------------------------------------------------------
 class SalaryStructureBase(BaseModel):
-    ctc: Decimal = Field(..., description="Annual cost-to-company")
+    ctc: Decimal = Field(..., description="Annual cost-to-company (0 for hourly staff)")
     currency: str = Field(default="INR", max_length=8)
     pay_frequency: PayFrequency = Field(default=PayFrequency.MONTHLY)
+    # Required when pay_frequency is HOURLY: gross = hours_worked * rate.
+    hourly_rate: Decimal | None = Field(default=None, ge=0)
     effective_from: date
     components: list[MoneyLine]
     default_deductions: list[MoneyLine] = Field(default_factory=list)
@@ -85,6 +87,7 @@ class SalaryStructureUpdate(BaseModel):
     ctc: Decimal | None = None
     currency: str | None = Field(default=None, max_length=8)
     pay_frequency: PayFrequency | None = None
+    hourly_rate: Decimal | None = Field(default=None, ge=0)
     effective_from: date | None = None
     components: list[MoneyLine] | None = None
     default_deductions: list[MoneyLine] | None = None

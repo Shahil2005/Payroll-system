@@ -34,6 +34,9 @@ class SalaryStructure(Base, TimestampMixin):
     ctc: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(8), default="INR")
     pay_frequency: Mapped[str] = mapped_column(String(16), default="MONTHLY")
+    # Hourly-paid staff (pay_frequency == HOURLY): gross = hours_worked * rate.
+    # Null for salaried (MONTHLY/WEEKLY) structures. See compute_hourly_payslip.
+    hourly_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     effective_from: Mapped[date] = mapped_column(Date)
     # Earning lines: [{code,label,type,amount|percent,percent_of}]
     components: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)

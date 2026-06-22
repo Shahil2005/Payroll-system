@@ -93,6 +93,7 @@ async def create_salary_structure(
         ctc=payload.ctc,
         currency=payload.currency,
         pay_frequency=payload.pay_frequency.value,
+        hourly_rate=payload.hourly_rate,
         effective_from=payload.effective_from,
         components=[c.model_dump(mode="json") for c in payload.components],
         default_deductions=[d.model_dump(mode="json") for d in payload.default_deductions],
@@ -743,6 +744,18 @@ async def _gather_payslip(
     return payslip, cycle, employee, company
 
 
+def _payslip_working_days(payslip: Payslip) -> int:
+    """The working-day basis captured on the payslip at run time (attendance
+    snapshot), falling back to the fixed default for pre-timesheets payslips."""
+    try:
+        wd = (payslip.statutory or {}).get("attendance", {}).get("working_days")
+        if wd:
+            return int(round(float(wd)))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return DEFAULT_WORKING_DAYS
+
+
 def _render_pdf(
     payslip: Payslip, cycle: PayrollCycle, employee: Employee | None, company: Company | None
 ) -> bytes:
@@ -769,7 +782,7 @@ def _render_pdf(
         net=payslip.net_pay,
         lop_days=payslip.lop_days,
         paid_days=payslip.paid_days,
-        working_days=DEFAULT_WORKING_DAYS,
+        working_days=_payslip_working_days(payslip),
         currency=payslip.currency,
         employer_contributions=payslip.employer_contributions or [],
         accent_color=ps.accent_color,
@@ -906,7 +919,7 @@ def _docx_context(
         "net_raw": float(payslip.net_pay),
         "lop_days": float(payslip.lop_days or 0),
         "paid_days": float(payslip.paid_days or 0),
-        "working_days": int(DEFAULT_WORKING_DAYS),
+        "working_days": _payslip_working_days(payslip),
     }
 
 

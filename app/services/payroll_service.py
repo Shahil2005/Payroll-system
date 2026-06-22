@@ -28,8 +28,10 @@ from app.models.payroll import (
 )
 from app.models.taxes import EmployeeTaxProfile
 from app.schema.settings import StatutoryConfig
+from app.services import calendar_service
 from app.services import statutory as statutory_rules
 from app.services import tax_engine
+from app.services import timesheet_service
 
 
 def _dec(value: float | int) -> Decimal:
@@ -285,6 +287,53 @@ def compute_payslip(
         "employer_total": _q(employer_total),
         "statutory": statutory_snapshot,
     }
+
+
+def compute_hourly_payslip(
+    structure: SalaryStructure,
+    total_hours: Decimal,
+    *,
+    pt_state: str | None = None,
+    adjustments: list[dict[str, Any]] | None = None,
+    tds_enabled: bool = False,
+    tax_profile: dict[str, Any] | None = None,
+    statutory: StatutoryConfig | None = None,
+) -> dict[str, Any]:
+    """Payslip for an hourly-paid employee: gross = total_hours * hourly_rate.
+
+    Reuses ``compute_payslip`` by synthesising a single fixed "WAGES" earning
+    from the hours worked, with no LOP proration (the hours already reflect
+    actual work). Statutory (PF/ESI/PT/TDS) and the structure's own deduction
+    lines still apply on the wage gross.
+    """
+    rate = Decimal(str(structure.hourly_rate or "0"))
+    wage = _q(total_hours * rate)
+    transient = SalaryStructure(
+        company_id=structure.company_id,
+        ctc=Decimal("0"),
+        currency=structure.currency,
+        pay_frequency=PayFrequency.MONTHLY.value,
+        components=[
+            {"code": "WAGES", "label": "Wages", "type": LineType.FIXED.value, "amount": float(wage)}
+        ],
+        default_deductions=structure.default_deductions or [],
+        pf_enabled=structure.pf_enabled,
+        pf_cap_at_ceiling=structure.pf_cap_at_ceiling,
+        pf_wage_codes=structure.pf_wage_codes,
+        esi_enabled=structure.esi_enabled,
+        pt_enabled=structure.pt_enabled,
+        tds_enabled=structure.tds_enabled,
+    )
+    return compute_payslip(
+        transient,
+        Decimal("0"),
+        Decimal("1"),
+        pt_state=pt_state,
+        adjustments=adjustments,
+        tds_enabled=tds_enabled,
+        tax_profile=tax_profile,
+        statutory=statutory,
+    )
 
 
 async def _load_statutory_config(db: AsyncSession, company_id: uuid.UUID) -> StatutoryConfig:
@@ -609,7 +658,12 @@ async def run_payroll(
             detail=f"Cycle must be DRAFT or PROCESSING to run (is {cycle.status})",
         )
 
-    working_days = Decimal(DEFAULT_WORKING_DAYS)
+    # Proration denominator: derived from the company work calendar (weekly-offs
+    # + holidays) over the cycle period, or the fixed DEFAULT_WORKING_DAYS when
+    # the company has calendar-derived working days disabled.
+    working_days = await calendar_service.working_days_in_period(
+        db, company_id, cycle.period_start, cycle.period_end
+    )
 
     employees = (
         await db.execute(
@@ -694,30 +748,71 @@ async def run_payroll(
             )
         ).scalar_one_or_none()
 
-        # LOP is configured on the salary structure by HR; it drives proration.
-        lop_days = Decimal(str(struct.lop_days or "0"))
+        # Attendance source: an APPROVED timesheet for this cycle overrides the
+        # structure's static lop_days (hourly structures source total hours from
+        # it). With no approved timesheet we fall back to struct.lop_days, so
+        # behaviour is unchanged until HR adopts timesheets.
+        approved_ts = await timesheet_service.get_approved(db, employee.id, cycle_id)
+        is_hourly = str(struct.pay_frequency) == PayFrequency.HOURLY.value
+        total_hours: Decimal | None = None
 
         try:
-            computed = compute_payslip(
-                struct,
-                lop_days,
-                working_days,
-                pt_state=employee.state,
-                adjustments=adjustments_by_employee.get(employee.id),
-                tds_enabled=bool(struct.tds_enabled),
-                tax_profile=tax_profile_by_employee.get(employee.id),
-                statutory=statutory_config,
-            )
+            if is_hourly:
+                if approved_ts is None:
+                    skipped.append(
+                        {"employee_id": employee.id, "reason": "no approved timesheet (hourly)"}
+                    )
+                    continue
+                total_hours = Decimal(str(approved_ts.total_hours or "0"))
+                lop_days = Decimal("0")
+                computed = compute_hourly_payslip(
+                    struct,
+                    total_hours,
+                    pt_state=employee.state,
+                    adjustments=adjustments_by_employee.get(employee.id),
+                    tds_enabled=bool(struct.tds_enabled),
+                    tax_profile=tax_profile_by_employee.get(employee.id),
+                    statutory=statutory_config,
+                )
+            else:
+                lop_days = (
+                    Decimal(str(approved_ts.lop_days or "0"))
+                    if approved_ts is not None
+                    else Decimal(str(struct.lop_days or "0"))
+                )
+                computed = compute_payslip(
+                    struct,
+                    lop_days,
+                    working_days,
+                    pt_state=employee.state,
+                    adjustments=adjustments_by_employee.get(employee.id),
+                    tds_enabled=bool(struct.tds_enabled),
+                    tax_profile=tax_profile_by_employee.get(employee.id),
+                    statutory=statutory_config,
+                )
         except ValueError as exc:
             skipped.append({"employee_id": employee.id, "reason": str(exc)})
             continue
+
+        # Record how attendance was derived, for an auditable payslip snapshot.
+        snapshot = computed.get("statutory") or {}
+        snapshot["attendance"] = {
+            "source": "timesheet" if approved_ts is not None else "structure",
+            "working_days": float(working_days),
+            "lop_days": float(lop_days),
+            "total_hours": float(total_hours) if total_hours is not None else None,
+            "timesheet_id": str(approved_ts.id) if approved_ts is not None else None,
+        }
+        computed["statutory"] = snapshot
+        # Hourly payslips have no day-proration, so paid_days is not meaningful.
+        paid_days = None if is_hourly else computed["paid_days"]
 
         if existing:
             existing.gross_earnings = computed["gross_earnings"]
             existing.total_deductions = computed["total_deductions"]
             existing.net_pay = computed["net_pay"]
             existing.lop_days = lop_days
-            existing.paid_days = computed["paid_days"]
+            existing.paid_days = paid_days
             existing.earnings = computed["earnings"]
             existing.deductions = computed["deductions"]
             existing.employer_contributions = computed["employer_contributions"]
@@ -735,7 +830,7 @@ async def run_payroll(
                     total_deductions=computed["total_deductions"],
                     net_pay=computed["net_pay"],
                     lop_days=lop_days,
-                    paid_days=computed["paid_days"],
+                    paid_days=paid_days,
                     earnings=computed["earnings"],
                     deductions=computed["deductions"],
                     employer_contributions=computed["employer_contributions"],

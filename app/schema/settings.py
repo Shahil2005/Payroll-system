@@ -1,6 +1,6 @@
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -191,6 +191,77 @@ class StatutoryConfig(BaseModel):
     def from_stored(data: dict[str, Any] | None) -> "StatutoryConfig":
         """Build from the company's stored JSON (None/partial -> defaults)."""
         return StatutoryConfig(**(data or {}))
+
+
+# ---------------------------------------------------------------------------
+# Work calendar (Settings → Statutory Compliance / Timesheets)
+# ---------------------------------------------------------------------------
+# Drives how the working-day count for a payroll period is derived. When
+# `use_calendar_working_days` is on, working_days = calendar days in the period
+# minus weekly-offs minus holidays; otherwise the fixed DEFAULT_WORKING_DAYS (30)
+# is used. Stored as JSON on the company alongside the statutory config.
+_DAY_CODES = {"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+
+
+def _normalize_weekly_offs(v: list[str]) -> list[str]:
+    """Normalise/validate weekly-off day codes (dedup, uppercase 3-letter)."""
+    out: list[str] = []
+    for d in v:
+        code = str(d).strip().upper()[:3]
+        if code not in _DAY_CODES:
+            raise ValueError(f"invalid weekly-off day: {d!r}")
+        if code not in out:
+            out.append(code)
+    return out
+
+
+class WorkCalendarConfig(BaseModel):
+    use_calendar_working_days: bool = True
+    weekly_offs: list[str] = Field(default_factory=lambda: ["SAT", "SUN"])
+    # Segregation of duties: when on, the user who submitted a timesheet cannot
+    # also approve it (maker ≠ checker). Off by default so existing single-HR
+    # setups are unaffected. Lives here because it governs the attendance
+    # workflow surfaced on the Timesheets screen alongside the calendar config.
+    enforce_maker_checker: bool = False
+
+    @field_validator("weekly_offs")
+    @classmethod
+    def _check_days(cls, v: list[str]) -> list[str]:
+        return _normalize_weekly_offs(v)
+
+    @staticmethod
+    def from_stored(data: dict[str, Any] | None) -> "WorkCalendarConfig":
+        """Build from the company's stored JSON (None/partial -> defaults)."""
+        raw = data or {}
+        keys = ("use_calendar_working_days", "weekly_offs", "enforce_maker_checker")
+        sub = {k: raw[k] for k in keys if k in raw}
+        return WorkCalendarConfig(**sub)
+
+
+class WorkCalendarConfigUpdate(BaseModel):
+    """Partial update — only provided fields change."""
+
+    use_calendar_working_days: bool | None = None
+    weekly_offs: list[str] | None = None
+    enforce_maker_checker: bool | None = None
+
+    @field_validator("weekly_offs")
+    @classmethod
+    def _check_days(cls, v: list[str] | None) -> list[str] | None:
+        return None if v is None else _normalize_weekly_offs(v)
+
+
+class HolidayIn(BaseModel):
+    holiday_date: date
+    name: str = Field(min_length=1, max_length=160)
+
+
+class HolidayOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    holiday_date: date
+    name: str
 
 
 class StatutoryConfigUpdate(BaseModel):
