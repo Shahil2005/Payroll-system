@@ -289,6 +289,15 @@ class PayslipDetailOut(PayslipOut):
     statutory: dict[str, Any] | None = None
 
 
+class MyPayslipOut(PayslipDetailOut):
+    """A payslip with its cycle context, for the employee self-service view."""
+
+    cycle_name: str | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+    pay_date: date | None = None
+
+
 # ---------------------------------------------------------------------------
 # Per-run adjustments (one-time earnings/deductions for a cycle)
 # ---------------------------------------------------------------------------

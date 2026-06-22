@@ -14,6 +14,7 @@ from app.router.base import router as base_router
 from app.router.calendar import router as calendar_router
 from app.router.employee import router as employee_router
 from app.router.leave import router as leave_router
+from app.router.me import router as me_router
 from app.router.payroll import router as payroll_router
 from app.router.reports import router as reports_router
 from app.router.settings import router as settings_router
@@ -122,3 +123,4 @@ app.include_router(audit_router)
 app.include_router(calendar_router)
 app.include_router(timesheets_router)
 app.include_router(leave_router)
+app.include_router(me_router)

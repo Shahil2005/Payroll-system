@@ -20,6 +20,8 @@ class UserOut(BaseModel):
     full_name: str
     role: str
     is_active: bool
+    # Linked employee for self-service (EMPLOYEE) users; null otherwise.
+    employee_id: uuid.UUID | None = None
     # Resolved permission strings for this user's role (frontend gating).
     permissions: list[str] = []
     created_at: datetime
@@ -37,6 +39,8 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=6)
     full_name: str = Field(default="", max_length=160)
     role: Role = Role.VIEWER
+    # Required when role is EMPLOYEE (self-service): the Employee this login owns.
+    employee_id: uuid.UUID | None = None
 
 
 class SignupRequest(BaseModel):

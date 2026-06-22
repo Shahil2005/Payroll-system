@@ -120,6 +120,16 @@ export default function LeavePage() {
     });
   }
 
+  async function seedDefaults() {
+    if (!(await confirm({
+      title: "Add standard leave types",
+      message:
+        "Add the standard set — Casual (12), Sick (12), Earned (15, monthly), Maternity (182), " +
+        "Paternity (15), Bereavement (5) and Loss of Pay? Existing types are kept as-is.",
+    }))) return;
+    await run(() => leaveApi.seedDefaultTypes());
+  }
+
   async function decide(
     r: LeaveRequest,
     action: "approve" | "reject" | "cancel",
@@ -338,11 +348,43 @@ export default function LeavePage() {
 
       {/* Leave types config */}
       <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-        <h2 className="mb-1 text-lg font-bold">Leave types</h2>
+        <div className="mb-1 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-bold">Leave types</h2>
+          {canEdit && types.length > 0 && (
+            <button
+              onClick={seedDefaults}
+              disabled={busy}
+              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs font-semibold text-[var(--color-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
+            >
+              Add standard set
+            </button>
+          )}
+        </div>
         <p className="mb-4 text-sm text-[var(--color-muted)]">
           Paid types carry an annual quota that accrues into each employee’s balance. Unpaid types
           (loss of pay) always land as LOP.
         </p>
+
+        {/* Empty state: offer the standard set so the company isn't stuck with an
+            empty dropdown on the apply form. */}
+        {types.length === 0 && canEdit && (
+          <div className="mb-4 flex flex-col items-start gap-3 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+            <div>
+              <p className="font-semibold">No leave types yet</p>
+              <p className="text-sm text-[var(--color-muted)]">
+                Add the standard India-market set to get started — Casual, Sick, Earned, Maternity,
+                Paternity, Bereavement and Loss of Pay. You can edit or add more below.
+              </p>
+            </div>
+            <button
+              onClick={seedDefaults}
+              disabled={busy}
+              className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--color-primary-hover)] disabled:opacity-50"
+            >
+              Add standard leave types
+            </button>
+          </div>
+        )}
 
         {types.length > 0 && (
           <ul className="mb-4 flex flex-col gap-1">

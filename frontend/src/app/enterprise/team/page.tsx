@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { authApi, type UserRole } from "@/utils/api";
+import { authApi, payrollApi, type Employee, type UserRole } from "@/utils/api";
 import type { AuthUser } from "@/utils/auth";
 import { Banner, Modal } from "@/components/ui";
 import { useAuth } from "@/components/AuthProvider";
@@ -10,15 +10,17 @@ const ROLES: { value: UserRole; label: string; hint: string }[] = [
   { value: "ADMIN", label: "Admin", hint: "Full access, including managing users" },
   { value: "HR", label: "HR", hint: "Full payroll lifecycle, no user management" },
   { value: "VIEWER", label: "Viewer", hint: "Read-only access to payroll data" },
+  { value: "EMPLOYEE", label: "Employee", hint: "Self-service: sees only their own records" },
 ];
 
 const ROLE_BADGE: Record<string, string> = {
   ADMIN: "bg-[var(--color-primary)]/15 text-[var(--color-primary)]",
   HR: "bg-[var(--color-accent)]/15 text-[var(--color-accent)]",
   VIEWER: "bg-[var(--color-hover)] text-[var(--color-muted)]",
+  EMPLOYEE: "bg-[var(--color-hover)] text-[var(--color-muted)]",
 };
 
-const EMPTY = { email: "", full_name: "", password: "", role: "VIEWER" as UserRole };
+const EMPTY = { email: "", full_name: "", password: "", role: "VIEWER" as UserRole, employee_id: "" };
 
 export default function TeamPage() {
   const { user: me } = useAuth();
@@ -30,11 +32,23 @@ export default function TeamPage() {
   const [saving, setSaving] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+
+  // Employees already tied to a login — excluded from the picker (one login each).
+  const linkedEmployeeIds = new Set(
+    users.map((u) => u.employee_id).filter(Boolean) as string[]
+  );
+  const linkableEmployees = employees.filter((e) => !linkedEmployeeIds.has(e.id));
 
   async function load() {
     setLoading(true);
     try {
-      setUsers(await authApi.listUsers());
+      const [u, emps] = await Promise.all([
+        authApi.listUsers(),
+        payrollApi.listEmployees(),
+      ]);
+      setUsers(u);
+      setEmployees(emps);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -57,6 +71,7 @@ export default function TeamPage() {
         full_name: form.full_name,
         password: form.password,
         role: form.role,
+        employee_id: form.role === "EMPLOYEE" ? form.employee_id || null : null,
       });
       setOpen(false);
       setForm(EMPTY);
@@ -194,7 +209,7 @@ export default function TeamPage() {
               <select
                 className="input"
                 value={form.role}
-                onChange={(e) => setForm({ ...form, role: e.target.value as UserRole })}
+                onChange={(e) => setForm({ ...form, role: e.target.value as UserRole, employee_id: "" })}
               >
                 {ROLES.map((r) => (
                   <option key={r.value} value={r.value}>
@@ -203,6 +218,31 @@ export default function TeamPage() {
                 ))}
               </select>
             </label>
+
+            {form.role === "EMPLOYEE" && (
+              <label className="flex flex-col gap-1.5">
+                <span className="lbl">Linked Employee</span>
+                <select
+                  className="input"
+                  required
+                  value={form.employee_id}
+                  onChange={(e) => setForm({ ...form, employee_id: e.target.value })}
+                >
+                  <option value="" disabled>
+                    Select an employee…
+                  </option>
+                  {linkableEmployees.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {`${e.first_name} ${e.last_name}`.trim() || e.employee_id || e.id}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-[var(--color-dim)]">
+                  This login will only see this employee&apos;s own records.
+                  {linkableEmployees.length === 0 && " All employees already have a login."}
+                </span>
+              </label>
+            )}
 
             <div className="flex gap-3">
               <button type="submit" disabled={saving} className="btn-primary">

@@ -7,7 +7,9 @@ from app.constants import Permission, Role, permissions_for
 from app.core.dependencies import CurrentUserDep, DBSessionDep, get_current_company_id, require_permission
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.company import Company
+from app.models.employee import Employee
 from app.models.user import User
+from app.services import leave_service
 from app.schema.auth import LoginRequest, SignupRequest, TokenResponse, UserCreate, UserOut
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -75,16 +77,23 @@ async def signup(payload: SignupRequest, db: DBSessionDep) -> TokenResponse:
         is_active=True,
     )
     db.add(user)
+    company_id = company.id  # capture before commit expires the instance
     try:
         await db.commit()
         await db.refresh(user)
     except Exception:
         await db.rollback()
         raise
+    # Build the token + response now, while `user` is fresh — the seeding below
+    # commits and would expire the instance (a later attr read → MissingGreenlet).
     token = create_access_token(
         user_id=user.id, company_id=user.company_id, role=user.role
     )
-    return TokenResponse(access_token=token, user=_to_out(user))
+    response = TokenResponse(access_token=token, user=_to_out(user))
+    # Pre-populate the standard leave types so a new org isn't stuck with an
+    # empty leave-type list (mirrors how Zoho/Keka ship defaults out of the box).
+    await leave_service.seed_default_types(db, company_id)
+    return response
 
 
 @router.get("/me", response_model=UserOut)
@@ -129,6 +138,48 @@ async def create_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="A user with this email already exists.",
         )
+
+    # Self-service users must be tied to an Employee in this company; non-employee
+    # roles must not be (the link is what scopes /me/* to one person's records).
+    if payload.role is Role.EMPLOYEE and payload.employee_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="An EMPLOYEE user must be linked to an employee_id.",
+        )
+    if payload.employee_id is not None:
+        if payload.role is not Role.EMPLOYEE:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="employee_id may only be set for the EMPLOYEE role.",
+            )
+        owned = (
+            await db.execute(
+                select(Employee.id).where(
+                    Employee.id == payload.employee_id,
+                    Employee.company_id == company_id,
+                    Employee.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        if owned is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Employee not found in this company.",
+            )
+        already = (
+            await db.execute(
+                select(User.id).where(
+                    User.employee_id == payload.employee_id,
+                    User.deleted_at.is_(None),
+                )
+            )
+        ).first()
+        if already is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This employee already has a linked login.",
+            )
+
     user = User(
         company_id=company_id,
         email=payload.email,
@@ -136,6 +187,7 @@ async def create_user(
         hashed_password=hash_password(payload.password),
         role=payload.role.value,
         is_active=True,
+        employee_id=payload.employee_id,
     )
     db.add(user)
     try:

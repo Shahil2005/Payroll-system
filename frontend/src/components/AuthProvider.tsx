@@ -15,7 +15,7 @@ import {
 interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<AuthUser>;
   signup: (payload: SignupPayload) => Promise<void>;
   logout: () => Promise<void>;
   can: (permission: Permission) => boolean;
@@ -49,6 +49,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const res = await authApi.login(email, password);
     setSession(res.access_token, res.user);
     setUser(res.user);
+    return res.user;
   }, []);
 
   const signup = useCallback(async (payload: SignupPayload) => {

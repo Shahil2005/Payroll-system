@@ -80,3 +80,21 @@ def require_permission(permission: Permission):
         return current_user
 
     return checker
+
+
+async def get_current_employee_id(
+    current_user: Annotated[User, Depends(require_permission(Permission.SELF_READ))],
+) -> uuid.UUID:
+    """Resolve the linked Employee id for a self-service (EMPLOYEE) user.
+
+    Gates the /api/v1/me/* endpoints: the caller must hold SELF_READ *and* be
+    linked to an Employee. A SELF_READ user with no link is a misconfiguration
+    (409) — there is nothing to scope to. Every self-endpoint filters by the
+    returned id, so a user can only ever read their own records.
+    """
+    if current_user.employee_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account is not linked to an employee record.",
+        )
+    return current_user.employee_id

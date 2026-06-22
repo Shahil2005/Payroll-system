@@ -224,6 +224,107 @@ def test_half_day_counts_half() -> None:
         assert Decimal(str(req["days"])) == Decimal("0.5")
 
 
+def test_seed_default_leave_types_is_idempotent() -> None:
+    with authed_client(ADMIN) as c:
+        # First seed creates the standard set.
+        resp = c.post(f"{LEAVE_BASE}/types/seed-defaults")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        created = resp.json()
+        codes = {t["code"] for t in created}
+        assert {"CL", "SL", "EL", "ML", "PL", "BL", "LOP"} <= codes
+
+        # Earned Leave accrues monthly with a carry-forward cap; LOP is unpaid.
+        el = next(t for t in created if t["code"] == "EL")
+        assert el["accrual"] == "MONTHLY"
+        assert Decimal(str(el["carry_forward_cap"])) == Decimal("30")
+        lop = next(t for t in created if t["code"] == "LOP")
+        assert lop["is_paid"] is False
+
+        # Seeding again creates nothing new (idempotent by code).
+        again = c.post(f"{LEAVE_BASE}/types/seed-defaults").json()
+        assert again == []
+        all_types = c.get(f"{LEAVE_BASE}/types").json()
+        assert len([t for t in all_types if t["code"] in codes]) == len(codes)
+
+
+def test_paid_half_day_adds_no_lop() -> None:
+    """A paid half-day leave covers the off-half -> HALF_DAY_PAID, zero LOP."""
+    with authed_client(ADMIN) as c:
+        lt = _create_type(c)  # is_paid=True
+        _create_structure(c, employee_id=EMP1)
+        cycle = _create_cycle(c)
+        _generate(c, cycle["id"])
+        req = _request(c, lt["id"], "2026-06-02", "2026-06-02", half_day=True)
+        assert c.post(f"{LEAVE_BASE}/requests/{req['id']}/approve", json={}).status_code == 200
+
+        ts = _emp_timesheet(c, cycle["id"])
+        detail = c.get(f"{TS_BASE}/{ts['id']}").json()
+        marked = {e["entry_date"]: e["day_status"] for e in detail["entries"]}
+        assert marked["2026-06-02"] == "HALF_DAY_PAID"
+        assert Decimal(str(detail["lop_days"])) == Decimal("0")  # paid -> no LOP
+
+
+def test_unpaid_half_day_adds_half_lop() -> None:
+    """An unpaid half-day leave -> HALF_DAY, 0.5 LOP."""
+    with authed_client(ADMIN) as c:
+        lt = _create_type(c, name="Loss of Pay", code="LOP", is_paid=False, annual_quota=0)
+        _create_structure(c, employee_id=EMP1)
+        cycle = _create_cycle(c)
+        _generate(c, cycle["id"])
+        req = _request(c, lt["id"], "2026-06-02", "2026-06-02", half_day=True)
+        assert c.post(f"{LEAVE_BASE}/requests/{req['id']}/approve", json={}).status_code == 200
+
+        ts = _emp_timesheet(c, cycle["id"])
+        detail = c.get(f"{TS_BASE}/{ts['id']}").json()
+        marked = {e["entry_date"]: e["day_status"] for e in detail["entries"]}
+        assert marked["2026-06-02"] == "HALF_DAY"
+        assert Decimal(str(detail["lop_days"])) == Decimal("0.5")
+
+
+def test_cancel_approved_leave_restores_balance_and_reverts_timesheet() -> None:
+    with authed_client(ADMIN) as c:
+        lt = _create_type(c)
+        _create_structure(c, employee_id=EMP1)
+        cycle = _create_cycle(c)
+        _generate(c, cycle["id"])
+
+        req = _request(c, lt["id"], "2026-06-02", "2026-06-03")  # 2 working days
+        assert c.post(f"{LEAVE_BASE}/requests/{req['id']}/approve", json={}).status_code == 200
+
+        # Cancel the now-approved request.
+        resp = c.post(f"{LEAVE_BASE}/requests/{req['id']}/cancel", json={})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["status"] == "CANCELLED"
+
+        # Balance credited back to the full quota.
+        balances = c.get(f"{LEAVE_BASE}/balances").json()
+        cl = next(b for b in balances if b["leave_type_id"] == lt["id"] and b["employee_id"] == EMP1)
+        assert Decimal(str(cl["used"])) == Decimal("0")
+        assert Decimal(str(cl["balance"])) == Decimal("12")
+
+        # Timesheet days reverted from PAID_LEAVE to PRESENT.
+        ts = _emp_timesheet(c, cycle["id"])
+        detail = c.get(f"{TS_BASE}/{ts['id']}").json()
+        marked = {e["entry_date"]: e["day_status"] for e in detail["entries"]}
+        assert marked["2026-06-02"] == "PRESENT"
+        assert marked["2026-06-03"] == "PRESENT"
+        assert Decimal(str(detail["lop_days"])) == Decimal("0")
+
+
+def test_overlapping_leave_request_rejected() -> None:
+    with authed_client(ADMIN) as c:
+        lt = _create_type(c)
+        _create_cycle(c)
+        _request(c, lt["id"], "2026-06-02", "2026-06-03")
+        # A second request sharing 06-03 must be refused.
+        body = {
+            "employee_id": EMP1, "leave_type_id": lt["id"],
+            "start_date": "2026-06-03", "end_date": "2026-06-04",
+        }
+        resp = c.post(f"{LEAVE_BASE}/requests", json=body)
+        assert resp.status_code == status.HTTP_409_CONFLICT, resp.text
+
+
 # ---------------------------------------------------------------------------
 # Segregation of duties (maker-checker)
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { useAuth } from "@/components/AuthProvider";
-import { permissionForRoute } from "@/utils/auth";
+import { isSelfServiceUser, permissionForRoute } from "@/utils/auth";
 
 const NAV: { label: string; icon: string; path: string }[] = [
   { label: "Dashboard", icon: "dashboard", path: "/enterprise/dashboard" },
@@ -30,9 +30,13 @@ export default function EnterpriseLayout({
   const router = useRouter();
   const { user, loading, logout, can } = useAuth();
 
-  // Session guard: bounce unauthenticated users to the login screen.
+  // Session guard: bounce unauthenticated users to the login screen, and
+  // self-service (EMPLOYEE) users to their own area — the enterprise app is
+  // company-wide and they hold no payroll:* permission.
   useEffect(() => {
-    if (!loading && !user) router.replace("/login");
+    if (loading) return;
+    if (!user) router.replace("/login");
+    else if (isSelfServiceUser(user)) router.replace("/employee/dashboard");
   }, [loading, user, router]);
 
   if (loading || !user) {

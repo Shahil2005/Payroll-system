@@ -12,7 +12,8 @@ export type Permission =
   | "payroll:approve"
   | "payroll:pay"
   | "payroll:manage"
-  | "users:manage";
+  | "users:manage"
+  | "self:read";
 
 export interface AuthUser {
   id: string;
@@ -21,6 +22,8 @@ export interface AuthUser {
   full_name: string;
   role: string;
   is_active: boolean;
+  // Set for self-service (EMPLOYEE) users — the Employee record they own.
+  employee_id?: string | null;
   permissions: string[];
 }
 
@@ -53,6 +56,23 @@ export function clearSession(): void {
 
 export function userCan(user: AuthUser | null, permission: Permission): boolean {
   return !!user && user.permissions.includes(permission);
+}
+
+/** True for a self-service user (can read only their own records, not the
+ *  company-wide /enterprise app). */
+export function isSelfServiceUser(user: AuthUser | null): boolean {
+  return (
+    !!user &&
+    user.permissions.includes("self:read") &&
+    !user.permissions.includes("payroll:read")
+  );
+}
+
+/** Where to send a user after login / when they hit the wrong app section.
+ *  Self-service users land in their own area; everyone else in the enterprise
+ *  app. */
+export function landingPath(user: AuthUser | null): string {
+  return isSelfServiceUser(user) ? "/employee/dashboard" : "/enterprise/dashboard";
 }
 
 // Single source of truth for which permission an enterprise route requires.

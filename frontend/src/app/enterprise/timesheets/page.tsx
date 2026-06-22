@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   calendarApi,
@@ -38,6 +38,7 @@ export default function TimesheetsPage() {
 
   const cycle = cycles.find((c) => c.id === cycleId) || null;
   const cycleEditable = cycle?.status === "DRAFT" || cycle?.status === "PROCESSING";
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   async function loadCycles() {
     setLoading(true);
@@ -102,6 +103,29 @@ export default function TimesheetsPage() {
       setError((err as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function importAttendance(file: File) {
+    if (!cycleId) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await timesheetApi.importAttendance(cycleId, file);
+      const parts = [`${res.updated} day${res.updated === 1 ? "" : "s"} updated`];
+      if (res.skipped.length) parts.push(`${res.skipped.length} row(s) skipped`);
+      setNotice(parts.join(" · "));
+      if (res.skipped.length) {
+        const sample = res.skipped.slice(0, 3).map((s) => `row ${s.row}: ${s.reason}`).join("; ");
+        setError(`Skipped — ${sample}${res.skipped.length > 3 ? " …" : ""}`);
+      }
+      await loadRows(cycleId);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+      if (importInputRef.current) importInputRef.current.value = "";
     }
   }
 
@@ -224,7 +248,41 @@ export default function TimesheetsPage() {
             Generate timesheets
           </button>
         )}
+        {canEdit && (
+          <>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importAttendance(f);
+              }}
+            />
+            <button
+              onClick={() => importInputRef.current?.click()}
+              disabled={!cycleId || busy || !cycleEditable || rows.length === 0}
+              title={
+                rows.length === 0
+                  ? "Generate timesheets first"
+                  : "Upload a CSV: employee_code, date, status/hours/check_in/check_out"
+              }
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-semibold text-[var(--color-text)] hover:bg-[var(--color-hover)] disabled:opacity-50"
+            >
+              <span className="material-symbols-outlined text-[18px]">upload_file</span>
+              Import attendance (CSV)
+            </button>
+          </>
+        )}
       </div>
+      {canEdit && cycleId && rows.length > 0 && (
+        <p className="-mt-3 mb-6 text-xs text-[var(--color-dim)]">
+          CSV columns (header row): <span className="font-mono">employee_code, date, status, hours,
+          check_in, check_out</span>. Only <span className="font-mono">date</span> + an identifier are
+          required; status is PRESENT/WFH/HALF_DAY/ABSENT.
+        </p>
+      )}
 
       {/* Timesheet rows */}
       {loading ? (

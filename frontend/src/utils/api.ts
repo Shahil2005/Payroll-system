@@ -446,6 +446,7 @@ export type DayStatus =
   | "PAID_LEAVE"
   | "UNPAID_LEAVE"
   | "HALF_DAY"
+  | "HALF_DAY_PAID"
   | "WFH"
   | "HOLIDAY"
   | "WEEKLY_OFF";
@@ -456,7 +457,8 @@ export const DAY_STATUS_OPTIONS: { value: DayStatus; label: string }[] = [
   { value: "PRESENT", label: "Present" },
   { value: "PAID_LEAVE", label: "Paid Leave" },
   { value: "UNPAID_LEAVE", label: "Unpaid Leave (LOP)" },
-  { value: "HALF_DAY", label: "Half Day" },
+  { value: "HALF_DAY", label: "Half Day (unpaid ½)" },
+  { value: "HALF_DAY_PAID", label: "Half Day (paid ½)" },
   { value: "WFH", label: "Work From Home" },
   { value: "HOLIDAY", label: "Holiday" },
   { value: "WEEKLY_OFF", label: "Weekly Off" },
@@ -504,6 +506,11 @@ export interface TimesheetGenerateResult {
   skipped: SkippedEmployee[];
 }
 
+export interface AttendanceImportResult {
+  updated: number;
+  skipped: { row: number; reason: string }[];
+}
+
 /** One day's edit (matched to a seeded entry by date). */
 export interface TimesheetEntryEdit {
   entry_date: string;
@@ -529,6 +536,12 @@ export interface WorkCalendarConfig {
 export const timesheetApi = {
   generate: (cycleId: string) =>
     apiClient.post<TimesheetGenerateResult>(`${TS}/cycles/${cycleId}/generate`),
+  // Import a CSV/biometric attendance export onto the cycle's timesheets.
+  importAttendance: (cycleId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return apiClient.postForm<AttendanceImportResult>(`${TS}/cycles/${cycleId}/import`, form);
+  },
   listForCycle: (cycleId: string) => apiClient.get<Timesheet[]>(`${TS}/cycles/${cycleId}`),
   get: (id: string) => apiClient.get<TimesheetDetail>(`${TS}/${id}`),
   updateEntries: (id: string, entries: TimesheetEntryEdit[]) =>
@@ -619,6 +632,8 @@ export interface LeaveRequestInput {
 export const leaveApi = {
   listTypes: () => apiClient.get<LeaveType[]>(`${LV}/types`),
   createType: (body: LeaveTypeInput) => apiClient.post<LeaveType>(`${LV}/types`, body),
+  // One-click standard India-market leave types (CL/SL/EL/ML/PL/BL/LOP).
+  seedDefaultTypes: () => apiClient.post<LeaveType[]>(`${LV}/types/seed-defaults`),
   updateType: (id: string, body: Partial<LeaveTypeInput> & { is_active?: boolean }) =>
     apiClient.put<LeaveType>(`${LV}/types/${id}`, body),
   listBalances: (financialYear?: string) =>
@@ -881,13 +896,15 @@ export interface SignupPayload {
   password: string;
 }
 
-export type UserRole = "ADMIN" | "HR" | "VIEWER";
+export type UserRole = "ADMIN" | "HR" | "VIEWER" | "EMPLOYEE";
 
 export interface NewUserPayload {
   email: string;
   password: string;
   full_name: string;
   role: UserRole;
+  // Required when role is EMPLOYEE — the Employee this login owns.
+  employee_id?: string | null;
 }
 
 export const authApi = {
@@ -899,6 +916,46 @@ export const authApi = {
   // Org user administration (ADMIN only).
   listUsers: () => apiClient.get<AuthUser[]>(`${A}/users`),
   createUser: (body: NewUserPayload) => apiClient.post<AuthUser>(`${A}/users`, body),
+};
+
+// --- Employee self-service (/api/v1/me) ------------------------------------
+const ME = "/api/v1/me";
+
+/** A payslip with its cycle context (employee self-service view). */
+export interface MyPayslip extends Payslip {
+  cycle_name?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  pay_date?: string | null;
+}
+
+/** Self-service leave application — no employee_id (server fills it from the
+ *  signed-in user's link). */
+export interface MyLeaveRequestInput {
+  leave_type_id: string;
+  start_date: string;
+  end_date: string;
+  half_day?: boolean;
+  reason?: string | null;
+}
+
+/** Access to the signed-in employee's OWN records. The backend scopes every
+ *  response to their linked employee_id. Reads + own leave apply/cancel. */
+export const meApi = {
+  timesheets: () => apiClient.get<Timesheet[]>(`${ME}/timesheets`),
+  timesheet: (id: string) => apiClient.get<TimesheetDetail>(`${ME}/timesheets/${id}`),
+  // Self-mark attendance on own draft timesheet (Present/WFH + hours).
+  markTimesheet: (id: string, entries: TimesheetEntryEdit[]) =>
+    apiClient.put<TimesheetDetail>(`${ME}/timesheets/${id}/mark`, { entries }),
+  payslips: () => apiClient.get<MyPayslip[]>(`${ME}/payslips`),
+  payslip: (id: string) => apiClient.get<MyPayslip>(`${ME}/payslips/${id}`),
+  leaveTypes: () => apiClient.get<LeaveType[]>(`${ME}/leave/types`),
+  leaveBalances: () => apiClient.get<LeaveBalance[]>(`${ME}/leave/balances`),
+  leaveRequests: () => apiClient.get<LeaveRequest[]>(`${ME}/leave/requests`),
+  fileLeave: (body: MyLeaveRequestInput) =>
+    apiClient.post<LeaveRequest>(`${ME}/leave/requests`, body),
+  cancelLeave: (id: string, note?: string) =>
+    apiClient.post<LeaveRequest>(`${ME}/leave/requests/${id}/cancel`, { note: note ?? null }),
 };
 
 // --- Helpers ---------------------------------------------------------------

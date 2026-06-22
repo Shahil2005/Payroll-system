@@ -269,3 +269,60 @@ def test_edit_blocked_after_approval() -> None:
             json={"entries": [{"entry_date": any_day, "day_status": "UNPAID_LEAVE"}]},
         )
         assert resp.status_code == status.HTTP_409_CONFLICT
+
+
+# ---------------------------------------------------------------------------
+# CSV / biometric attendance import
+# ---------------------------------------------------------------------------
+def _import_csv(c: Any, cycle_id: str, csv_text: str) -> dict[str, Any]:
+    resp = c.post(
+        f"{TS_BASE}/cycles/{cycle_id}/import",
+        files={"file": ("attendance.csv", csv_text.encode(), "text/csv")},
+    )
+    assert resp.status_code == status.HTTP_200_OK, resp.text
+    return resp.json()
+
+
+def test_import_attendance_status_and_hours() -> None:
+    with authed_client(ADMIN) as c:
+        _create_structure(c, employee_id=EMP1)
+        cycle = _create_cycle(c)  # 2026-06-01 .. 06-30
+        _generate(c, cycle["id"])
+        # 06-02 Tue, 06-03 Wed — both working days.
+        csv_text = (
+            "employee_id,date,status,hours\n"
+            f"{EMP1},2026-06-02,WFH,8\n"
+            f"{EMP1},2026-06-03,ABSENT,\n"
+        )
+        result = _import_csv(c, cycle["id"], csv_text)
+        assert result["updated"] == 2
+        assert result["skipped"] == []
+
+        ts = _emp_timesheet(c, cycle["id"], EMP1)
+        detail = c.get(f"{TS_BASE}/{ts['id']}").json()
+        marked = {e["entry_date"]: e["day_status"] for e in detail["entries"]}
+        assert marked["2026-06-02"] == "WFH"
+        assert marked["2026-06-03"] == "UNPAID_LEAVE"  # ABSENT -> LOP
+        assert Decimal(str(detail["lop_days"])) == Decimal("1")
+
+
+def test_import_attendance_punch_times_and_skips() -> None:
+    with authed_client(ADMIN) as c:
+        _create_structure(c, employee_id=EMP1)
+        cycle = _create_cycle(c)
+        _generate(c, cycle["id"])
+        csv_text = (
+            "employee_id,date,check_in,check_out\n"
+            f"{EMP1},2026-06-02,09:00,17:30\n"  # 8.5h, present
+            "99999999-9999-9999-9999-999999999999,2026-06-02,09:00,17:30\n"  # unknown emp
+            f"{EMP1},2026-06-06,09:00,17:30\n"  # Saturday -> weekly-off, skipped
+        )
+        result = _import_csv(c, cycle["id"], csv_text)
+        assert result["updated"] == 1
+        assert len(result["skipped"]) == 2  # unknown employee + non-working day
+
+        ts = _emp_timesheet(c, cycle["id"], EMP1)
+        detail = c.get(f"{TS_BASE}/{ts['id']}").json()
+        entry = next(e for e in detail["entries"] if e["entry_date"] == "2026-06-02")
+        assert entry["day_status"] == "PRESENT"  # a punch implies present
+        assert Decimal(str(entry["hours"])) == Decimal("8.50")
